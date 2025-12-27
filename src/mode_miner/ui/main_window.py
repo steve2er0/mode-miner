@@ -19,7 +19,7 @@ from ..model.modal_model import ModalModel
 
 
 class MainWindow(QMainWindow):
-    """Main Wavemap application window."""
+    """Main Mode Miner application window."""
     
     def __init__(self):
         super().__init__()
@@ -33,7 +33,7 @@ class MainWindow(QMainWindow):
     
     def _setup_ui(self):
         """Setup the main UI layout."""
-        self.setWindowTitle("Wavemap")
+        self.setWindowTitle("Mode Miner")
         self.resize(1400, 900)
         
         # Apply dark theme

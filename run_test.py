@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Wavemap with synthetic test data.
+"""Run Mode Miner with synthetic test data.
 
 This script loads the cantilever plate BDF and synthetic modal data
 for testing the visualization without needing a real OP2 file.
@@ -18,10 +18,10 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 import numpy as np
 from PySide6.QtWidgets import QApplication
 
-from wavemap.ui.main_window import MainWindow
-from wavemap.ingest.bdf_reader import load_bdf_mesh
-from wavemap.model.modal_model import ModalModel
-from wavemap.model.dof_map import DOFMap
+from mode_miner.ui.main_window import MainWindow
+from mode_miner.ingest.bdf_reader import load_bdf_mesh
+from mode_miner.model.modal_model import ModalModel
+from mode_miner.model.dof_map import DOFMap
 
 
 def generate_synthetic_modes(node_ids: np.ndarray, node_coords: np.ndarray):
@@ -121,7 +121,7 @@ def load_test_data(window):
 
 
 def main():
-    """Launch Wavemap with test data."""
+    """Launch Mode Miner with test data."""
     from PySide6.QtCore import QTimer
     
     # Enable high-DPI support on macOS
@@ -129,14 +129,14 @@ def main():
         os.environ.setdefault('QT_ENABLE_HIGHDPI_SCALING', '1')
     
     app = QApplication(sys.argv)
-    app.setApplicationName("Wavemap - Test Mode")
+    app.setApplicationName("Mode Miner - Test Mode")
     
     window = MainWindow()
-    window.setWindowTitle("Wavemap - Test Mode")
+    window.setWindowTitle("Mode Miner - Test Mode")
     window.show()
     app.processEvents()
     
-    print("Window shown, waiting for PyVista to initialize...", flush=True)
+    print("Window shown, loading test data...", flush=True)
     
     # Defer data loading until after PyVista plotter is ready (500ms delay)
     QTimer.singleShot(500, lambda: load_test_data(window))

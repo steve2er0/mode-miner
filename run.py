@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Wavemap - Structural dynamics visualization tool."""
+"""Mode Miner - Structural dynamics visualization tool."""
 
 import sys
 import os
@@ -12,23 +12,23 @@ os.environ['QT_API'] = 'pyside6'
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from PySide6.QtWidgets import QApplication
-from wavemap.ui.main_window import MainWindow
+from mode_miner.ui.main_window import MainWindow
 
 
 def main():
-    """Launch the Wavemap application."""
+    """Launch the Mode Miner application."""
     # Ensure proper Qt attributes for macOS
     if sys.platform == 'darwin':
         # Enable high-DPI support
         os.environ.setdefault('QT_ENABLE_HIGHDPI_SCALING', '1')
     
     app = QApplication(sys.argv)
-    app.setApplicationName("Wavemap")
+    app.setApplicationName("Mode Miner")
     
     window = MainWindow()
     window.show()
     
-    # Process events to ensure window is visible before VTK initializes
+    # Process events to ensure window is visible
     app.processEvents()
     
     sys.exit(app.exec())

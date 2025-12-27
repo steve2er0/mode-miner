@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate synthetic modal data for testing Wavemap.
+"""Generate synthetic modal data for testing Mode Miner.
 
 This script creates a synthetic OP2-like data structure that can be used
 to test the mode animation without needing a real NASTRAN run.

@@ -1,6 +1,6 @@
-"""Mesh viewer widget using matplotlib 3D with element highlighting."""
+"""Mesh viewer widget using matplotlib 3D with overlays for markers and arrows."""
 
-from typing import Optional, Set
+from typing import Optional, Set, List, Tuple
 import numpy as np
 
 from PySide6.QtWidgets import QWidget, QVBoxLayout
@@ -12,15 +12,29 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
-from ..ingest.bdf_reader import BDFData, get_element_subset_mesh
+from ..ingest.bdf_reader import BDFData
 from ..model.modal_model import ModalModel
 
 
+# DOF component to direction vector mapping (1-indexed)
+DOF_DIRECTIONS = {
+    1: np.array([1.0, 0.0, 0.0]),  # Tx -> +X
+    2: np.array([0.0, 1.0, 0.0]),  # Ty -> +Y
+    3: np.array([0.0, 0.0, 1.0]),  # Tz -> +Z
+    4: np.array([1.0, 0.0, 0.0]),  # Rx -> rotation about X
+    5: np.array([0.0, 1.0, 0.0]),  # Ry -> rotation about Y
+    6: np.array([0.0, 0.0, 1.0]),  # Rz -> rotation about Z
+}
+
+
 class MeshView(QWidget):
-    """3D mesh visualization widget with element highlighting.
+    """3D mesh visualization widget with element highlighting and markers.
     
-    Displays the structural mesh, animates mode shapes, and supports
-    highlighting subsets of elements.
+    Displays the structural mesh, animates mode shapes, and supports:
+    - Element highlighting
+    - Grid point markers
+    - Force direction arrows
+    - Response location markers
     """
     
     def __init__(self, parent: Optional[QWidget] = None):
@@ -44,7 +58,10 @@ class MeshView(QWidget):
         self._poly_collection = None
         self._highlight_collection = None
         self._faces = None
-        self._face_to_element: dict = {}  # face_index -> element_id
+        self._face_to_element: dict = {}
+        
+        # Node ID to coordinate index mapping
+        self._node_id_to_idx: dict = {}
         
         # Animation state
         self._animation_timer = QTimer(self)
@@ -54,13 +71,19 @@ class MeshView(QWidget):
         self._animation_scale = 1.0
         self._base_points: Optional[np.ndarray] = None
         self._mode_displacements: Optional[np.ndarray] = None
-        
-        # Animation parameters
         self._animation_fps = 20
         self._animation_speed = 1.0
         
-        # Current highlight state
+        # Overlay state
         self._highlighted_elements: Set[int] = set()
+        self._selected_grids: List[int] = []
+        self._force_grid_id: Optional[int] = None
+        self._force_component: Optional[int] = None
+        self._response_grid_id: Optional[int] = None
+        self._response_component: Optional[int] = None
+        
+        # Model bounding box for scaling
+        self._model_diagonal = 1.0
         
         self._canvas.draw()
     
@@ -83,15 +106,26 @@ class MeshView(QWidget):
     def set_mesh(self, bdf_data: BDFData):
         """Set the mesh to display."""
         self.stop_animation()
-        self.clear_highlight()
+        self.clear_all_overlays()
         
         self._bdf_data = bdf_data
         self._base_points = bdf_data.node_coords.copy()
         
+        # Build node ID to index mapping
+        self._node_id_to_idx = {
+            int(nid): idx for idx, nid in enumerate(bdf_data.node_ids)
+        }
+        
+        # Compute model bounding box diagonal for scaling
+        bbox = np.max(self._base_points, axis=0) - np.min(self._base_points, axis=0)
+        self._model_diagonal = np.linalg.norm(bbox)
+        if self._model_diagonal < 1e-10:
+            self._model_diagonal = 1.0
+        
         # Extract faces with element mapping
         self._faces, self._face_to_element = self._extract_faces_with_mapping(bdf_data)
         
-        self._render_mesh(self._base_points)
+        self._render_full()
     
     def _extract_faces_with_mapping(self, bdf_data: BDFData):
         """Extract face vertex indices with element ID mapping."""
@@ -112,7 +146,6 @@ class MeshView(QWidget):
             face_indices = cells[i+1:i+1+n_verts]
             faces.append(face_indices)
             
-            # Map face to element ID
             if cell_idx in bdf_data.cell_idx_to_element_id:
                 face_to_elem[face_idx] = bdf_data.cell_idx_to_element_id[cell_idx]
             
@@ -122,16 +155,31 @@ class MeshView(QWidget):
         
         return faces, face_to_elem
     
-    def _render_mesh(self, points: np.ndarray, highlighted_faces: Optional[Set[int]] = None):
-        """Render the mesh with optional highlighting."""
+    def _render_full(self):
+        """Full render including mesh and all overlays."""
+        points = self._base_points
+        if points is None:
+            return
+        
         self._ax.clear()
         self._setup_axes()
         
+        # Render mesh
+        self._render_mesh_faces(points)
+        
+        # Render overlays
+        self._render_grid_markers(points)
+        self._render_force_arrow(points)
+        self._render_response_marker(points)
+        
+        self._set_axis_limits(points)
+        self._canvas.draw()
+    
+    def _render_mesh_faces(self, points: np.ndarray):
+        """Render the mesh faces with highlighting."""
         if self._faces is None or len(self._faces) == 0:
-            self._canvas.draw()
             return
         
-        # Separate highlighted and normal faces
         normal_verts = []
         highlight_verts = []
         
@@ -144,7 +192,7 @@ class MeshView(QWidget):
             else:
                 normal_verts.append(face_verts)
         
-        # Render normal elements
+        # Normal elements
         if normal_verts:
             self._poly_collection = Poly3DCollection(
                 normal_verts,
@@ -155,7 +203,7 @@ class MeshView(QWidget):
             )
             self._ax.add_collection3d(self._poly_collection)
         
-        # Render highlighted elements
+        # Highlighted elements
         if highlight_verts:
             self._highlight_collection = Poly3DCollection(
                 highlight_verts,
@@ -165,13 +213,124 @@ class MeshView(QWidget):
                 alpha=0.95
             )
             self._ax.add_collection3d(self._highlight_collection)
+    
+    def _render_grid_markers(self, points: np.ndarray):
+        """Render spherical markers at selected grid points."""
+        if not self._selected_grids:
+            return
         
-        self._set_axis_limits(points)
-        self._canvas.draw()
+        marker_coords = []
+        for grid_id in self._selected_grids:
+            if grid_id in self._node_id_to_idx:
+                idx = self._node_id_to_idx[grid_id]
+                marker_coords.append(points[idx])
+        
+        if marker_coords:
+            coords = np.array(marker_coords)
+            marker_size = max(50, 200 * (self._model_diagonal / 10))
+            self._ax.scatter(
+                coords[:, 0], coords[:, 1], coords[:, 2],
+                c='#00ff88', s=marker_size, marker='o',
+                edgecolors='white', linewidths=1.5,
+                alpha=0.9, zorder=10
+            )
+    
+    def _render_force_arrow(self, points: np.ndarray):
+        """Render purple arrow at force input location."""
+        if self._force_grid_id is None or self._force_component is None:
+            return
+        
+        if self._force_grid_id not in self._node_id_to_idx:
+            return
+        
+        idx = self._node_id_to_idx[self._force_grid_id]
+        origin = points[idx]
+        
+        # Arrow length = 5% of model diagonal
+        arrow_length = 0.08 * self._model_diagonal
+        
+        # Get direction from component
+        if self._force_component in DOF_DIRECTIONS:
+            direction = DOF_DIRECTIONS[self._force_component]
+        else:
+            direction = np.array([0, 0, 1])
+        
+        end = origin + direction * arrow_length
+        
+        # Check if rotational DOF
+        is_rotation = self._force_component in [4, 5, 6]
+        color = '#9933ff' if not is_rotation else '#cc66ff'
+        
+        # Draw arrow using quiver
+        self._ax.quiver(
+            origin[0], origin[1], origin[2],
+            direction[0] * arrow_length,
+            direction[1] * arrow_length,
+            direction[2] * arrow_length,
+            color=color, arrow_length_ratio=0.3,
+            linewidth=3, alpha=0.95, zorder=15
+        )
+        
+        # Add force label
+        label_offset = direction * arrow_length * 1.2
+        dof_labels = ['', 'Fx', 'Fy', 'Fz', 'Mx', 'My', 'Mz']
+        label = dof_labels[self._force_component] if self._force_component <= 6 else 'F'
+        self._ax.text(
+            origin[0] + label_offset[0],
+            origin[1] + label_offset[1],
+            origin[2] + label_offset[2],
+            label, color=color, fontsize=10, fontweight='bold',
+            zorder=16
+        )
+    
+    def _render_response_marker(self, points: np.ndarray):
+        """Render response location marker (diamond/star shape)."""
+        if self._response_grid_id is None or self._response_component is None:
+            return
+        
+        if self._response_grid_id not in self._node_id_to_idx:
+            return
+        
+        idx = self._node_id_to_idx[self._response_grid_id]
+        pos = points[idx]
+        
+        marker_size = max(100, 300 * (self._model_diagonal / 10))
+        
+        # Use diamond marker for response
+        self._ax.scatter(
+            [pos[0]], [pos[1]], [pos[2]],
+            c='#ffcc00', s=marker_size, marker='D',
+            edgecolors='white', linewidths=2,
+            alpha=0.95, zorder=12
+        )
+        
+        # Optionally show small direction indicator for translation DOFs
+        if self._response_component in [1, 2, 3]:
+            direction = DOF_DIRECTIONS[self._response_component]
+            arrow_length = 0.04 * self._model_diagonal
+            
+            self._ax.quiver(
+                pos[0], pos[1], pos[2],
+                direction[0] * arrow_length,
+                direction[1] * arrow_length,
+                direction[2] * arrow_length,
+                color='#ffcc00', arrow_length_ratio=0.4,
+                linewidth=2, alpha=0.8, zorder=13
+            )
+        
+        # Add response label
+        dof_labels = ['', 'vx', 'vy', 'vz', 'ωx', 'ωy', 'ωz']
+        label = dof_labels[self._response_component] if self._response_component <= 6 else 'v'
+        offset = 0.03 * self._model_diagonal
+        self._ax.text(
+            pos[0] + offset, pos[1] + offset, pos[2] + offset,
+            label, color='#ffcc00', fontsize=10, fontweight='bold',
+            zorder=14
+        )
     
     def _set_axis_limits(self, points: np.ndarray):
         """Set axis limits based on points."""
-        margin = 0.1
+        margin = 0.15
         x_min, x_max = points[:, 0].min(), points[:, 0].max()
         y_min, y_max = points[:, 1].min(), points[:, 1].max()
         z_min, z_max = points[:, 2].min(), points[:, 2].max()
@@ -194,26 +353,89 @@ class MeshView(QWidget):
         max_range = max(x_max - x_min, y_max - y_min, z_max - z_min)
         if max_range > 0:
             self._ax.set_box_aspect([
-                (x_max - x_min) / max_range,
-                (y_max - y_min) / max_range,
-                (z_max - z_min) / max_range
+                (x_max - x_min + 2*x_margin) / (max_range + 2*max(x_margin, y_margin, z_margin)),
+                (y_max - y_min + 2*y_margin) / (max_range + 2*max(x_margin, y_margin, z_margin)),
+                (z_max - z_min + 2*z_margin) / (max_range + 2*max(x_margin, y_margin, z_margin))
             ])
     
+    # === Public API for overlays ===
+    
     def highlight_elements(self, element_ids: Set[int]):
-        """Highlight a set of elements.
-        
-        Args:
-            element_ids: Set of NASTRAN element IDs to highlight
-        """
+        """Highlight a set of elements."""
         self._highlighted_elements = element_ids
-        if self._base_points is not None:
-            self._render_mesh(self._base_points)
+        self._render_full()
     
     def clear_highlight(self):
-        """Clear all element highlighting."""
+        """Clear element highlighting."""
         self._highlighted_elements = set()
+        self._render_full()
+    
+    def set_selected_grids(self, grid_ids: List[int]):
+        """Set grid points to mark with spheres."""
+        self._selected_grids = grid_ids
+        self._render_full()
+    
+    def clear_selected_grids(self):
+        """Clear grid markers."""
+        self._selected_grids = []
+        self._render_full()
+    
+    def set_force_marker(self, grid_id: Optional[int], component: Optional[int]):
+        """Set force arrow location and direction.
+        
+        Args:
+            grid_id: Grid point ID for force location (None to clear)
+            component: DOF component 1-6 (None to clear)
+        """
+        self._force_grid_id = grid_id
+        self._force_component = component
+        self._render_full()
+    
+    def clear_force_marker(self):
+        """Remove force arrow."""
+        self._force_grid_id = None
+        self._force_component = None
+        self._render_full()
+    
+    def set_response_marker(self, grid_id: Optional[int], component: Optional[int]):
+        """Set response marker location and direction.
+        
+        Args:
+            grid_id: Grid point ID for response location (None to clear)
+            component: DOF component 1-6 (None to clear)
+        """
+        self._response_grid_id = grid_id
+        self._response_component = component
+        self._render_full()
+    
+    def clear_response_marker(self):
+        """Remove response marker."""
+        self._response_grid_id = None
+        self._response_component = None
+        self._render_full()
+    
+    def clear_all_overlays(self):
+        """Clear all overlays (highlights, markers, arrows)."""
+        self._highlighted_elements = set()
+        self._selected_grids = []
+        self._force_grid_id = None
+        self._force_component = None
+        self._response_grid_id = None
+        self._response_component = None
         if self._base_points is not None:
-            self._render_mesh(self._base_points)
+            self._render_full()
+    
+    def get_grid_position(self, grid_id: int) -> Optional[np.ndarray]:
+        """Get the XYZ position of a grid point."""
+        if grid_id in self._node_id_to_idx and self._base_points is not None:
+            return self._base_points[self._node_id_to_idx[grid_id]].copy()
+        return None
+    
+    def is_valid_grid(self, grid_id: int) -> bool:
+        """Check if a grid ID exists in the model."""
+        return grid_id in self._node_id_to_idx
+    
+    # === Modal animation ===
     
     def set_modal_model(self, modal_model: ModalModel):
         """Set the modal model for animation."""
@@ -247,15 +469,12 @@ class MeshView(QWidget):
         self._animation_mode_index = None
         
         if self._bdf_data is not None and self._base_points is not None:
-            self._render_mesh(self._base_points)
+            self._render_full()
     
     def _compute_auto_scale(self) -> float:
         """Compute automatic scale factor for mode animation."""
         if self._mode_displacements is None or self._base_points is None:
             return 1.0
-        
-        bbox_size = np.max(self._base_points, axis=0) - np.min(self._base_points, axis=0)
-        model_size = np.max(bbox_size)
         
         disp_magnitude = np.linalg.norm(self._mode_displacements, axis=1)
         max_disp = np.max(disp_magnitude)
@@ -263,7 +482,7 @@ class MeshView(QWidget):
         if max_disp < 1e-12:
             return 1.0
         
-        target_disp = 0.15 * model_size
+        target_disp = 0.15 * self._model_diagonal
         return target_disp / max_disp
     
     def _animation_step(self):
@@ -280,11 +499,10 @@ class MeshView(QWidget):
         self._update_mesh_points(displaced)
     
     def _update_mesh_points(self, points: np.ndarray):
-        """Update mesh vertex positions for animation."""
+        """Update mesh vertex positions for animation (fast path)."""
         if self._poly_collection is None or self._faces is None:
             return
         
-        # Rebuild vertices
         normal_verts = []
         highlight_verts = []
         

@@ -220,12 +220,13 @@ class MainWindow(QMainWindow):
     
     def _connect_signals(self):
         """Connect widget signals."""
-        # Model tree -> highlight elements in 3D
-        self._model_tree.grid_selected.connect(self._on_grid_selected)
+        # Model tree -> highlight elements and grids in 3D
+        self._model_tree.grid_selected.connect(self._on_grids_selected)
+        self._model_tree.element_selected.connect(self._on_elements_selected)
         self._model_tree.elements_highlight_requested.connect(self._on_elements_highlight)
-        self._model_tree.clear_highlight_requested.connect(self._on_clear_highlight)
+        self._model_tree.clear_highlight_requested.connect(self._on_clear_all_overlays)
         
-        # DOF selector -> update highlights
+        # DOF selector -> update force/response markers
         self._dof_selector.input_dof_changed.connect(self._on_input_dof_changed)
         self._dof_selector.response_dof_changed.connect(self._on_response_dof_changed)
         self._dof_selector.compute_requested.connect(self._on_compute_frf)
@@ -420,10 +421,31 @@ class MainWindow(QMainWindow):
                 f"Failed to generate synthetic modes:\n{str(e)}"
             )
     
-    def _on_grid_selected(self, grid_id: int):
-        """Handle grid selection from model tree."""
-        self._update_status(f"Selected Grid {grid_id}")
-        # TODO: Highlight node in 3D viewer
+    def _on_grids_selected(self, grid_ids):
+        """Handle grid selection from model tree (list of IDs)."""
+        if not grid_ids:
+            return
+        
+        # Show markers at selected grids
+        self._mesh_view.set_selected_grids(grid_ids)
+        
+        if len(grid_ids) == 1:
+            self._update_status(f"Selected Grid {grid_ids[0]}")
+        else:
+            self._update_status(f"Selected {len(grid_ids)} grids")
+    
+    def _on_elements_selected(self, element_ids):
+        """Handle element selection from model tree (list of IDs)."""
+        if not element_ids:
+            return
+        
+        # Highlight selected elements
+        self._mesh_view.highlight_elements(set(element_ids))
+        
+        if len(element_ids) == 1:
+            self._update_status(f"Selected Element {element_ids[0]}")
+        else:
+            self._update_status(f"Selected {len(element_ids)} elements")
     
     def _on_elements_highlight(self, element_ids):
         """Handle element highlight request from model tree."""
@@ -431,20 +453,40 @@ class MainWindow(QMainWindow):
         self._update_status(f"Highlighting {n_elems} elements")
         self._mesh_view.highlight_elements(element_ids)
     
-    def _on_clear_highlight(self):
-        """Handle clear highlight request."""
-        self._mesh_view.clear_highlight()
-        self._update_status("Highlight cleared")
+    def _on_clear_all_overlays(self):
+        """Handle clear all overlays request."""
+        self._mesh_view.clear_all_overlays()
+        self._update_status("Selection cleared")
     
     def _on_input_dof_changed(self, dof):
-        """Handle input DOF change."""
+        """Handle input DOF change - update force arrow."""
         if dof:
-            self._update_status(f"Input DOF: Node {dof.grid_id}, {['Tx','Ty','Tz','Rx','Ry','Rz'][dof.component-1]}")
+            dof_labels = ['Tx','Ty','Tz','Rx','Ry','Rz']
+            self._update_status(f"Input: Node {dof.grid_id}, {dof_labels[dof.component-1]}")
+            
+            # Validate grid exists
+            if self._mesh_view.is_valid_grid(dof.grid_id):
+                self._mesh_view.set_force_marker(dof.grid_id, dof.component)
+            else:
+                self._mesh_view.clear_force_marker()
+                self._dof_selector.set_error(f"Input node {dof.grid_id} not in model")
+        else:
+            self._mesh_view.clear_force_marker()
     
     def _on_response_dof_changed(self, dof):
-        """Handle response DOF change."""
+        """Handle response DOF change - update response marker."""
         if dof:
-            self._update_status(f"Response DOF: Node {dof.grid_id}, {['Tx','Ty','Tz','Rx','Ry','Rz'][dof.component-1]}")
+            dof_labels = ['Tx','Ty','Tz','Rx','Ry','Rz']
+            self._update_status(f"Response: Node {dof.grid_id}, {dof_labels[dof.component-1]}")
+            
+            # Validate grid exists
+            if self._mesh_view.is_valid_grid(dof.grid_id):
+                self._mesh_view.set_response_marker(dof.grid_id, dof.component)
+            else:
+                self._mesh_view.clear_response_marker()
+                self._dof_selector.set_error(f"Response node {dof.grid_id} not in model")
+        else:
+            self._mesh_view.clear_response_marker()
     
     def _on_compute_frf(self):
         """Handle FRF computation request."""
@@ -537,6 +579,8 @@ class MainWindow(QMainWindow):
         if self._modal_model is None:
             return
         
+        contributions = []
+        
         # Use stored FRF result to get DOFs for contribution calculation
         if hasattr(self, '_last_frf_result') and self._last_frf_result is not None:
             try:
@@ -551,23 +595,33 @@ class MainWindow(QMainWindow):
                     top_n=5
                 )
                 
-                self._mode_list.set_peak_filtered_modes(freq, contributions)
-                
             except Exception as e:
-                # Fallback to simple nearest mode
-                mode_freqs = self._modal_model.frequencies
-                closest_idx = int(abs(mode_freqs - freq).argmin())
-                contributions = [(closest_idx, 100.0)]
-                self._mode_list.set_peak_filtered_modes(freq, contributions)
-        else:
-            # No FRF result, use simple nearest mode
+                print(f"[Peak] Error computing contributions: {e}", flush=True)
+                contributions = []
+        
+        # Fallback to simple nearest mode if no contributions
+        if not contributions:
             mode_freqs = self._modal_model.frequencies
             closest_idx = int(abs(mode_freqs - freq).argmin())
             contributions = [(closest_idx, 100.0)]
-            self._mode_list.set_peak_filtered_modes(freq, contributions)
         
-        # Animate the dominant mode
-            self._mesh_view.animate_mode(closest_idx)
+        # Update mode list with contributing modes
+        self._mode_list.set_peak_filtered_modes(freq, contributions)
+        
+        # Animate the dominant mode (first in list, highest contribution)
+        if contributions:
+            dominant_mode_idx = contributions[0][0]
+            dominant_contrib = contributions[0][1]
+            mode_freq = self._modal_model.frequencies[dominant_mode_idx]
+            
+            self._update_status(
+                f"Peak @ {freq:.1f} Hz → Mode {dominant_mode_idx + 1} "
+                f"({mode_freq:.1f} Hz, {dominant_contrib:.1f}%)"
+            )
+            
+            # Select the mode in the list and animate it
+            self._mode_list.select_mode(dominant_mode_idx)
+            self._mesh_view.animate_mode(dominant_mode_idx)
     
     def _on_stop_animation(self):
         """Handle stop animation."""

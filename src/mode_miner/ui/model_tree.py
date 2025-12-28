@@ -1,11 +1,11 @@
 """Model Tree panel for BDF structure navigation with element highlighting."""
 
-from typing import Optional, Dict, Set
+from typing import Optional, Dict, Set, List
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QTreeWidget, QTreeWidgetItem, 
-    QLabel, QPushButton, QHBoxLayout
+    QLabel, QPushButton, QHBoxLayout, QAbstractItemView
 )
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QFont
 
 from ..ingest.bdf_reader import BDFData
@@ -15,14 +15,19 @@ class ModelTreeWidget(QWidget):
     """Tree view showing model structure with material/property drill-down.
     
     Signals:
-        grid_selected: Emitted when a grid ID is clicked
+        grid_selected: Emitted when grid IDs are selected (list of grid IDs)
+        element_selected: Emitted when element IDs are selected (list of element IDs)
         elements_highlight_requested: Emitted with set of element IDs to highlight
         clear_highlight_requested: Emitted when highlight should be cleared
     """
     
-    grid_selected = Signal(int)
+    grid_selected = Signal(object)  # List[int] of grid IDs
+    element_selected = Signal(object)  # List[int] of element IDs
     elements_highlight_requested = Signal(object)  # Set[int] of element IDs
     clear_highlight_requested = Signal()
+    
+    # Max items to show per category before truncating
+    MAX_ITEMS_DISPLAY = 100
     
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -48,7 +53,7 @@ class ModelTreeWidget(QWidget):
         
         header_layout.addStretch()
         
-        self._clear_btn = QPushButton("Clear Highlight")
+        self._clear_btn = QPushButton("Clear Selection")
         self._clear_btn.setStyleSheet("""
             QPushButton {
                 background-color: #0f3460;
@@ -62,15 +67,16 @@ class ModelTreeWidget(QWidget):
                 background-color: #1a4a7a;
             }
         """)
-        self._clear_btn.clicked.connect(self.clear_highlight_requested.emit)
+        self._clear_btn.clicked.connect(self._on_clear_clicked)
         self._clear_btn.hide()
         header_layout.addWidget(self._clear_btn)
         
         layout.addLayout(header_layout)
         
-        # Tree widget
+        # Tree widget with multi-select support
         self._tree = QTreeWidget()
         self._tree.setHeaderHidden(True)
+        self._tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._tree.setStyleSheet("""
             QTreeWidget {
                 background-color: #16213e;
@@ -91,7 +97,7 @@ class ModelTreeWidget(QWidget):
                 background-color: #16213e;
             }
         """)
-        self._tree.itemClicked.connect(self._on_item_clicked)
+        self._tree.itemSelectionChanged.connect(self._on_selection_changed)
         layout.addWidget(self._tree)
     
     def set_bdf_data(self, bdf_data: BDFData, bdf_raw=None):
@@ -119,7 +125,6 @@ class ModelTreeWidget(QWidget):
             self._tree.addTopLevelItem(materials_item)
             
             for mid, mat in sorted(self._bdf_raw.materials.items()):
-                # Count elements using this material
                 elem_count = len(self._bdf_data.material_to_elements.get(mid, set()))
                 child = QTreeWidgetItem([f"{mat.type} {mid} ({elem_count} elems)"])
                 child.setData(0, 256, "material")
@@ -136,7 +141,6 @@ class ModelTreeWidget(QWidget):
             
             for pid, prop in sorted(self._bdf_raw.properties.items()):
                 elem_count = len(self._bdf_data.property_to_elements.get(pid, set()))
-                # Get material IDs for this property
                 mids = self._bdf_data.property_to_material.get(pid, set())
                 mid_str = f" -> MID {','.join(map(str, sorted(mids)))}" if mids else ""
                 
@@ -148,20 +152,22 @@ class ModelTreeWidget(QWidget):
             props_item.setExpanded(True)
         
         # === GRIDS ===
-        grids_item = QTreeWidgetItem([f"Grids ({len(self._bdf_data.node_ids)})"])
+        n_grids = len(self._bdf_data.node_ids)
+        grids_item = QTreeWidgetItem([f"Grids ({n_grids})"])
         grids_item.setData(0, 256, "grids_root")
         self._tree.addTopLevelItem(grids_item)
         
-        # Add first 50 grids
-        for nid in self._bdf_data.node_ids[:50]:
+        # Add grids (limited for performance)
+        for i, nid in enumerate(self._bdf_data.node_ids):
+            if i >= self.MAX_ITEMS_DISPLAY:
+                more = QTreeWidgetItem([f"... and {n_grids - self.MAX_ITEMS_DISPLAY} more"])
+                more.setData(0, 256, "more_grids")
+                grids_item.addChild(more)
+                break
             child = QTreeWidgetItem([f"Grid {nid}"])
             child.setData(0, 256, "grid")
             child.setData(0, 257, int(nid))
             grids_item.addChild(child)
-        
-        if len(self._bdf_data.node_ids) > 50:
-            more = QTreeWidgetItem([f"... and {len(self._bdf_data.node_ids) - 50} more"])
-            grids_item.addChild(more)
         
         # === ELEMENTS ===
         n_elements = self._bdf_data.mesh.n_cells
@@ -169,19 +175,37 @@ class ModelTreeWidget(QWidget):
         elements_item.setData(0, 256, "elements_root")
         self._tree.addTopLevelItem(elements_item)
         
-        # Group by element type
+        # Group elements by type with individual IDs
         if self._bdf_raw:
-            elem_types: Dict[str, int] = {}
+            elem_by_type: Dict[str, List[int]] = {}
             for eid, elem in self._bdf_raw.elements.items():
-                elem_types[elem.type] = elem_types.get(elem.type, 0) + 1
+                if elem.type not in elem_by_type:
+                    elem_by_type[elem.type] = []
+                elem_by_type[elem.type].append(eid)
             
-            for etype, count in sorted(elem_types.items()):
-                child = QTreeWidgetItem([f"{etype} ({count})"])
-                elements_item.addChild(child)
+            for etype in sorted(elem_by_type.keys()):
+                eids = sorted(elem_by_type[etype])
+                type_item = QTreeWidgetItem([f"{etype} ({len(eids)})"])
+                type_item.setData(0, 256, "element_type")
+                type_item.setData(0, 257, etype)
+                elements_item.addChild(type_item)
+                
+                # Add individual element IDs (limited for performance)
+                for i, eid in enumerate(eids):
+                    if i >= self.MAX_ITEMS_DISPLAY:
+                        more = QTreeWidgetItem([f"... and {len(eids) - self.MAX_ITEMS_DISPLAY} more"])
+                        more.setData(0, 256, "more_elements")
+                        type_item.addChild(more)
+                        break
+                    child = QTreeWidgetItem([f"EID {eid}"])
+                    child.setData(0, 256, "element")
+                    child.setData(0, 257, eid)
+                    type_item.addChild(child)
         
         # === COORDINATE SYSTEMS ===
         if self._bdf_raw and hasattr(self._bdf_raw, 'coords') and len(self._bdf_raw.coords) > 1:
             coords_item = QTreeWidgetItem([f"Coord Systems ({len(self._bdf_raw.coords)})"])
+            coords_item.setData(0, 256, "coords_root")
             self._tree.addTopLevelItem(coords_item)
             
             for cid, coord in sorted(self._bdf_raw.coords.items()):
@@ -194,31 +218,67 @@ class ModelTreeWidget(QWidget):
             n_spcs = len(getattr(self._bdf_raw, 'spcs', {})) + len(getattr(self._bdf_raw, 'spc1s', {}))
         if n_spcs > 0:
             spcs_item = QTreeWidgetItem([f"Constraints ({n_spcs})"])
+            spcs_item.setData(0, 256, "constraints_root")
             self._tree.addTopLevelItem(spcs_item)
     
-    def _on_item_clicked(self, item: QTreeWidgetItem, column: int):
-        """Handle tree item click."""
-        item_type = item.data(0, 256)
-        item_id = item.data(0, 257)
+    def _on_selection_changed(self):
+        """Handle tree selection change (supports multi-select)."""
+        selected_items = self._tree.selectedItems()
         
-        if item_type == "grid" and item_id is not None:
-            self.grid_selected.emit(item_id)
+        if not selected_items:
+            return
         
-        elif item_type == "material" and item_id is not None:
-            # Highlight all elements using this material
-            if self._bdf_data:
-                elem_ids = self._bdf_data.material_to_elements.get(item_id, set())
-                if elem_ids:
-                    self._clear_btn.show()
-                    self.elements_highlight_requested.emit(elem_ids)
+        # Collect selected items by type
+        selected_grids: List[int] = []
+        selected_elements: List[int] = []
+        highlight_elements: Set[int] = set()
         
-        elif item_type == "property" and item_id is not None:
-            # Highlight all elements using this property
-            if self._bdf_data:
-                elem_ids = self._bdf_data.property_to_elements.get(item_id, set())
-                if elem_ids:
-                    self._clear_btn.show()
-                    self.elements_highlight_requested.emit(elem_ids)
+        for item in selected_items:
+            item_type = item.data(0, 256)
+            item_id = item.data(0, 257)
+            
+            if item_type == "grid" and item_id is not None:
+                selected_grids.append(item_id)
+            
+            elif item_type == "element" and item_id is not None:
+                selected_elements.append(item_id)
+                highlight_elements.add(item_id)
+            
+            elif item_type == "element_type" and item_id is not None:
+                # Select all elements of this type
+                if self._bdf_raw:
+                    for eid, elem in self._bdf_raw.elements.items():
+                        if elem.type == item_id:
+                            highlight_elements.add(eid)
+            
+            elif item_type == "material" and item_id is not None:
+                if self._bdf_data:
+                    elem_ids = self._bdf_data.material_to_elements.get(item_id, set())
+                    highlight_elements.update(elem_ids)
+            
+            elif item_type == "property" and item_id is not None:
+                if self._bdf_data:
+                    elem_ids = self._bdf_data.property_to_elements.get(item_id, set())
+                    highlight_elements.update(elem_ids)
+        
+        # Emit signals based on what was selected
+        if selected_grids:
+            self._clear_btn.show()
+            self.grid_selected.emit(selected_grids)
+        
+        if selected_elements:
+            self._clear_btn.show()
+            self.element_selected.emit(selected_elements)
+        
+        if highlight_elements:
+            self._clear_btn.show()
+            self.elements_highlight_requested.emit(highlight_elements)
+    
+    def _on_clear_clicked(self):
+        """Handle clear button click."""
+        self._tree.clearSelection()
+        self._clear_btn.hide()
+        self.clear_highlight_requested.emit()
     
     def clear(self):
         """Clear the tree."""

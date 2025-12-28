@@ -1,0 +1,64 @@
+$=========================================================
+$ Mode Miner Test Model
+$ 2 materials, 2 PSHELL properties, 2 shell elements
+$ Goal: Clicking MID/PID highlights the correct elements
+$=========================================================
+SOL 103
+CEND
+
+TITLE = MODE_MINER_TEST_PLATE
+SUBTITLE = 2_MATS_2_PROPS_2_ELEMS
+LABEL = SOL103_OP2_EIGENVECTORS
+
+$ --- Case Control ---
+SPC = 1
+METHOD = 1
+
+$ Request outputs (helpful for debugging; OP2 will be created by PARAM,POST)
+DISPLACEMENT(PLOT) = ALL
+
+BEGIN BULK
+
+$ --- Make OP2 contain results ---
+PARAM,POST,-1
+
+$ --- Units (informal): in, lbm, s (doesn't matter much for this test) ---
+$ --- Materials ---
+$ MAT1, MID, E, G, NU, RHO
+MAT1,1,1.0E7,,0.33,0.10
+MAT1,2,3.0E7,,0.29,0.28
+
+$ --- Shell Properties ---
+$ PSHELL, PID, MID1, T, MID2, 12I/T^3, MID3, TS/T, NSM
+PSHELL,10,1,0.10,,,,,0.0
+PSHELL,20,2,0.20,,,,,0.0
+
+$ --- Grids (simple 2x1 plate made of 2 quads) ---
+$ GRID, ID, CP, X, Y, Z
+GRID,1,,0.0,0.0,0.0
+GRID,2,,10.0,0.0,0.0
+GRID,3,,20.0,0.0,0.0
+GRID,4,,0.0,10.0,0.0
+GRID,5,,10.0,10.0,0.0
+GRID,6,,20.0,10.0,0.0
+
+$ --- Elements ---
+$ Left quad uses PID=10 (MID=1)
+CQUAD4,1001,10,1,2,5,4
+$ Right quad uses PID=20 (MID=2)
+CQUAD4,1002,20,2,3,6,5
+
+$ --- Constraints (remove rigid-body modes but keep it flexible) ---
+$ Constrain shell DOFs carefully:
+$ Node 1: fix all 6 DOF
+$ Node 3: fix TY, TZ (2,3)
+$ Node 4: fix TZ (3)
+SPC1,1,123456,1
+SPC1,1,23,3
+SPC1,1,3,4
+
+$ --- Eigenvalue extraction ---
+$ EIGRL, SID, V1, V2, ND, MSGLVL, MAXSET
+EIGRL,1,, ,20
+
+ENDDATA

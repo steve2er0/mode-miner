@@ -1,6 +1,6 @@
-"""Mesh viewer widget using matplotlib 3D."""
+"""Mesh viewer widget using matplotlib 3D with element highlighting."""
 
-from typing import Optional
+from typing import Optional, Set
 import numpy as np
 
 from PySide6.QtWidgets import QWidget, QVBoxLayout
@@ -10,17 +10,17 @@ import matplotlib
 matplotlib.use('QtAgg')
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from mpl_toolkits.mplot3d import Axes3D
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
-from ..ingest.bdf_reader import BDFData
+from ..ingest.bdf_reader import BDFData, get_element_subset_mesh
 from ..model.modal_model import ModalModel
 
 
 class MeshView(QWidget):
-    """3D mesh visualization widget using matplotlib.
+    """3D mesh visualization widget with element highlighting.
     
-    Displays the structural mesh and animates mode shapes.
+    Displays the structural mesh, animates mode shapes, and supports
+    highlighting subsets of elements.
     """
     
     def __init__(self, parent: Optional[QWidget] = None):
@@ -42,7 +42,9 @@ class MeshView(QWidget):
         self._bdf_data: Optional[BDFData] = None
         self._modal_model: Optional[ModalModel] = None
         self._poly_collection = None
-        self._faces = None  # Store face indices for animation
+        self._highlight_collection = None
+        self._faces = None
+        self._face_to_element: dict = {}  # face_index -> element_id
         
         # Animation state
         self._animation_timer = QTimer(self)
@@ -55,65 +57,73 @@ class MeshView(QWidget):
         
         # Animation parameters
         self._animation_fps = 20
-        self._animation_speed = 1.0  # cycles per second
+        self._animation_speed = 1.0
+        
+        # Current highlight state
+        self._highlighted_elements: Set[int] = set()
         
         self._canvas.draw()
     
     def _setup_axes(self):
         """Configure axes appearance."""
-        self._ax.set_facecolor('#1a1a2e')
-        self._ax.set_xlabel('X', color='white')
-        self._ax.set_ylabel('Y', color='white')
-        self._ax.set_zlabel('Z', color='white')
-        self._ax.tick_params(colors='white')
+        self._ax.set_facecolor('#16213e')
+        self._ax.set_xlabel('X', color='white', fontsize=10)
+        self._ax.set_ylabel('Y', color='white', fontsize=10)
+        self._ax.set_zlabel('Z', color='white', fontsize=10)
+        self._ax.tick_params(colors='white', labelsize=9)
         
-        # Make panes transparent
         self._ax.xaxis.pane.fill = False
         self._ax.yaxis.pane.fill = False
         self._ax.zaxis.pane.fill = False
         
-        # Make grid lines subtle
         self._ax.xaxis._axinfo['grid']['color'] = (0.3, 0.3, 0.4, 0.3)
         self._ax.yaxis._axinfo['grid']['color'] = (0.3, 0.3, 0.4, 0.3)
         self._ax.zaxis._axinfo['grid']['color'] = (0.3, 0.3, 0.4, 0.3)
     
     def set_mesh(self, bdf_data: BDFData):
-        """Set the mesh to display.
-        
-        Args:
-            bdf_data: BDF data containing mesh
-        """
+        """Set the mesh to display."""
         self.stop_animation()
+        self.clear_highlight()
         
         self._bdf_data = bdf_data
         self._base_points = bdf_data.node_coords.copy()
         
-        # Extract faces from PyVista mesh
-        self._faces = self._extract_faces(bdf_data.mesh)
+        # Extract faces with element mapping
+        self._faces, self._face_to_element = self._extract_faces_with_mapping(bdf_data)
         
-        # Render the mesh
         self._render_mesh(self._base_points)
     
-    def _extract_faces(self, mesh):
-        """Extract face vertex indices from PyVista mesh."""
+    def _extract_faces_with_mapping(self, bdf_data: BDFData):
+        """Extract face vertex indices with element ID mapping."""
         faces = []
+        face_to_elem = {}
         
+        mesh = bdf_data.mesh
         if mesh.n_cells == 0:
-            return faces
+            return faces, face_to_elem
         
-        # Get cell connectivity
         cells = mesh.cells
         i = 0
+        face_idx = 0
+        cell_idx = 0
+        
         while i < len(cells):
             n_verts = cells[i]
             face_indices = cells[i+1:i+1+n_verts]
             faces.append(face_indices)
+            
+            # Map face to element ID
+            if cell_idx in bdf_data.cell_idx_to_element_id:
+                face_to_elem[face_idx] = bdf_data.cell_idx_to_element_id[cell_idx]
+            
             i += n_verts + 1
+            face_idx += 1
+            cell_idx += 1
         
-        return faces
+        return faces, face_to_elem
     
-    def _render_mesh(self, points: np.ndarray):
-        """Render the mesh with given vertex positions."""
+    def _render_mesh(self, points: np.ndarray, highlighted_faces: Optional[Set[int]] = None):
+        """Render the mesh with optional highlighting."""
         self._ax.clear()
         self._setup_axes()
         
@@ -121,29 +131,51 @@ class MeshView(QWidget):
             self._canvas.draw()
             return
         
-        # Build polygon vertices
-        verts = []
-        for face_idx in self._faces:
+        # Separate highlighted and normal faces
+        normal_verts = []
+        highlight_verts = []
+        
+        for i, face_idx in enumerate(self._faces):
             face_verts = points[face_idx]
-            verts.append(face_verts)
+            elem_id = self._face_to_element.get(i)
+            
+            if elem_id is not None and elem_id in self._highlighted_elements:
+                highlight_verts.append(face_verts)
+            else:
+                normal_verts.append(face_verts)
         
-        # Create polygon collection
-        self._poly_collection = Poly3DCollection(
-            verts,
-            facecolors='steelblue',
-            edgecolors='white',
-            linewidths=0.5,
-            alpha=0.9
-        )
-        self._ax.add_collection3d(self._poly_collection)
+        # Render normal elements
+        if normal_verts:
+            self._poly_collection = Poly3DCollection(
+                normal_verts,
+                facecolors='steelblue',
+                edgecolors='#4a4a6a',
+                linewidths=0.3,
+                alpha=0.7
+            )
+            self._ax.add_collection3d(self._poly_collection)
         
-        # Set axis limits
+        # Render highlighted elements
+        if highlight_verts:
+            self._highlight_collection = Poly3DCollection(
+                highlight_verts,
+                facecolors='#ff6b6b',
+                edgecolors='white',
+                linewidths=1.0,
+                alpha=0.95
+            )
+            self._ax.add_collection3d(self._highlight_collection)
+        
+        self._set_axis_limits(points)
+        self._canvas.draw()
+    
+    def _set_axis_limits(self, points: np.ndarray):
+        """Set axis limits based on points."""
         margin = 0.1
         x_min, x_max = points[:, 0].min(), points[:, 0].max()
         y_min, y_max = points[:, 1].min(), points[:, 1].max()
         z_min, z_max = points[:, 2].min(), points[:, 2].max()
         
-        # Ensure some Z range even for flat meshes
         z_range = z_max - z_min
         if z_range < 0.01:
             z_center = (z_max + z_min) / 2
@@ -159,31 +191,36 @@ class MeshView(QWidget):
         self._ax.set_ylim(y_min - y_margin, y_max + y_margin)
         self._ax.set_zlim(z_min - z_margin, z_max + z_margin)
         
-        # Set equal aspect ratio
         max_range = max(x_max - x_min, y_max - y_min, z_max - z_min)
-        self._ax.set_box_aspect([
-            (x_max - x_min) / max_range,
-            (y_max - y_min) / max_range,
-            (z_max - z_min) / max_range
-        ])
-        
-        self._canvas.draw()
+        if max_range > 0:
+            self._ax.set_box_aspect([
+                (x_max - x_min) / max_range,
+                (y_max - y_min) / max_range,
+                (z_max - z_min) / max_range
+            ])
     
-    def set_modal_model(self, modal_model: ModalModel):
-        """Set the modal model for animation.
+    def highlight_elements(self, element_ids: Set[int]):
+        """Highlight a set of elements.
         
         Args:
-            modal_model: Modal analysis results
+            element_ids: Set of NASTRAN element IDs to highlight
         """
+        self._highlighted_elements = element_ids
+        if self._base_points is not None:
+            self._render_mesh(self._base_points)
+    
+    def clear_highlight(self):
+        """Clear all element highlighting."""
+        self._highlighted_elements = set()
+        if self._base_points is not None:
+            self._render_mesh(self._base_points)
+    
+    def set_modal_model(self, modal_model: ModalModel):
+        """Set the modal model for animation."""
         self._modal_model = modal_model
     
     def animate_mode(self, mode_index: int, scale: Optional[float] = None):
-        """Start animating a mode shape.
-        
-        Args:
-            mode_index: 0-based mode index
-            scale: Displacement scale factor. If None, auto-scales.
-        """
+        """Start animating a mode shape."""
         if self._modal_model is None or self._bdf_data is None:
             return
         
@@ -192,10 +229,8 @@ class MeshView(QWidget):
         
         self.stop_animation()
         
-        # Get translation displacements for this mode
         self._mode_displacements = self._modal_model.get_translation_shape(mode_index)
         
-        # Auto-scale if not specified
         if scale is None:
             scale = self._compute_auto_scale()
         
@@ -203,7 +238,6 @@ class MeshView(QWidget):
         self._animation_mode_index = mode_index
         self._animation_phase = 0.0
         
-        # Start animation timer
         interval_ms = int(1000 / self._animation_fps)
         self._animation_timer.start(interval_ms)
     
@@ -212,7 +246,6 @@ class MeshView(QWidget):
         self._animation_timer.stop()
         self._animation_mode_index = None
         
-        # Reset mesh to base position
         if self._bdf_data is not None and self._base_points is not None:
             self._render_mesh(self._base_points)
     
@@ -221,18 +254,15 @@ class MeshView(QWidget):
         if self._mode_displacements is None or self._base_points is None:
             return 1.0
         
-        # Get model bounding box size
         bbox_size = np.max(self._base_points, axis=0) - np.min(self._base_points, axis=0)
         model_size = np.max(bbox_size)
         
-        # Get max displacement magnitude
         disp_magnitude = np.linalg.norm(self._mode_displacements, axis=1)
         max_disp = np.max(disp_magnitude)
         
         if max_disp < 1e-12:
             return 1.0
         
-        # Target 15% of model size for good visibility
         target_disp = 0.15 * model_size
         return target_disp / max_disp
     
@@ -241,11 +271,9 @@ class MeshView(QWidget):
         if self._mode_displacements is None or self._base_points is None:
             return
         
-        # Update phase
         phase_increment = (2 * np.pi * self._animation_speed) / self._animation_fps
         self._animation_phase += phase_increment
         
-        # Compute displaced positions
         scale_factor = self._animation_scale * np.sin(self._animation_phase)
         displaced = self._base_points + scale_factor * self._mode_displacements
         
@@ -256,14 +284,24 @@ class MeshView(QWidget):
         if self._poly_collection is None or self._faces is None:
             return
         
-        # Build new polygon vertices
-        verts = []
-        for face_idx in self._faces:
-            face_verts = points[face_idx]
-            verts.append(face_verts)
+        # Rebuild vertices
+        normal_verts = []
+        highlight_verts = []
         
-        # Update the collection
-        self._poly_collection.set_verts(verts)
+        for i, face_idx in enumerate(self._faces):
+            face_verts = points[face_idx]
+            elem_id = self._face_to_element.get(i)
+            
+            if elem_id is not None and elem_id in self._highlighted_elements:
+                highlight_verts.append(face_verts)
+            else:
+                normal_verts.append(face_verts)
+        
+        if normal_verts:
+            self._poly_collection.set_verts(normal_verts)
+        if highlight_verts and self._highlight_collection:
+            self._highlight_collection.set_verts(highlight_verts)
+        
         self._canvas.draw_idle()
     
     @property

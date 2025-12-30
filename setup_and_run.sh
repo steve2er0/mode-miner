@@ -9,16 +9,9 @@ cd "$SCRIPT_DIR"
 
 echo "=== Mode Miner Setup ==="
 
-# Try to load Python 3.9 module on HPC systems
-if command -v module &> /dev/null; then
-    echo "HPC environment detected, loading Python module..."
-    module load python/3.9 2>/dev/null || \
-    module load python3/3.9 2>/dev/null || \
-    module load python/3.10 2>/dev/null || \
-    module load python3/3.10 2>/dev/null || \
-    module load python/3.11 2>/dev/null || \
-    echo "Could not auto-load Python module. Trying system Python..."
-fi
+# Note: On HPC systems, load Python 3.8+ module BEFORE running this script:
+#   module load python/3.9
+#   ./setup_and_run.sh
 
 # Check if Python 3 is available
 if command -v python3 &> /dev/null; then

@@ -6,6 +6,12 @@ echo === Mode Miner Setup ===
 
 cd /d "%~dp0"
 
+REM Clear Qt environment variables that may conflict with PySide6
+REM (Fixes issues when Anaconda is installed)
+set QT_PLUGIN_PATH=
+set QML2_IMPORT_PATH=
+set QT_QPA_PLATFORM_PLUGIN_PATH=
+
 REM Check if Python is available
 where python >nul 2>nul
 if %ERRORLEVEL% neq 0 (

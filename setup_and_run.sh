@@ -9,6 +9,17 @@ cd "$SCRIPT_DIR"
 
 echo "=== Mode Miner Setup ==="
 
+# Try to load Python 3.9 module on HPC systems
+if command -v module &> /dev/null; then
+    echo "HPC environment detected, loading Python module..."
+    module load python/3.9 2>/dev/null || \
+    module load python3/3.9 2>/dev/null || \
+    module load python/3.10 2>/dev/null || \
+    module load python3/3.10 2>/dev/null || \
+    module load python/3.11 2>/dev/null || \
+    echo "Could not auto-load Python module. Trying system Python..."
+fi
+
 # Check if Python 3 is available
 if command -v python3 &> /dev/null; then
     PYTHON=python3
@@ -16,7 +27,18 @@ elif command -v python &> /dev/null; then
     PYTHON=python
 else
     echo "ERROR: Python not found. Please load a Python module or install Python 3."
-    echo "On HPC, try: module load python/3.x"
+    echo "On HPC, try: module load python/3.9"
+    exit 1
+fi
+
+# Check Python version is 3.8+
+PY_VERSION=$($PYTHON -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+PY_MAJOR=$($PYTHON -c "import sys; print(sys.version_info.major)")
+PY_MINOR=$($PYTHON -c "import sys; print(sys.version_info.minor)")
+
+if [ "$PY_MAJOR" -lt 3 ] || ([ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 8 ]); then
+    echo "ERROR: Python 3.8+ required, but found Python $PY_VERSION"
+    echo "On HPC, try: module load python/3.9"
     exit 1
 fi
 

@@ -44,7 +44,7 @@ class DOFSelectorWidget(QWidget):
         # Header
         header = QLabel("Input / Response")
         header.setFont(QFont("", -1, QFont.Bold))
-        header.setStyleSheet("color: #e0e0e0; font-size: 13px;")
+        header.setStyleSheet("color: #569cd6; font-size: 12px;")
         layout.addWidget(header)
         
         # Input DOF group
@@ -171,68 +171,20 @@ class DOFSelectorWidget(QWidget):
         layout.addStretch()
     
     def _group_style(self) -> str:
-        return """
-            QGroupBox {
-                color: #c0c0c0;
-                border: 1px solid #4a4a6a;
-                border-radius: 4px;
-                margin-top: 8px;
-                padding-top: 8px;
-                font-size: 12px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 8px;
-                padding: 0 4px;
-            }
-        """
+        """Return empty string - styling is handled by main window stylesheet."""
+        return ""
     
     def _input_style(self) -> str:
-        return """
-            QLineEdit {
-                background-color: #16213e;
-                color: #e0e0e0;
-                border: 1px solid #4a4a6a;
-                border-radius: 3px;
-                padding: 4px;
-            }
-            QLineEdit:focus {
-                border-color: #0f4c75;
-            }
-        """
+        """Return empty string - styling is handled by main window stylesheet."""
+        return ""
     
     def _combo_style(self) -> str:
-        return """
-            QComboBox {
-                background-color: #16213e;
-                color: #e0e0e0;
-                border: 1px solid #4a4a6a;
-                border-radius: 3px;
-                padding: 4px;
-            }
-            QComboBox::drop-down {
-                border: none;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #16213e;
-                color: #e0e0e0;
-                selection-background-color: #0f3460;
-            }
-        """
+        """Return empty string - styling is handled by main window stylesheet."""
+        return ""
     
     def _spinbox_style(self) -> str:
-        return """
-            QDoubleSpinBox {
-                background-color: #16213e;
-                color: #e0e0e0;
-                border: 1px solid #4a4a6a;
-                border-radius: 3px;
-                padding: 4px;
-            }
-            QDoubleSpinBox:focus {
-                border-color: #0f4c75;
-            }
-        """
+        """Return empty string - styling is handled by main window stylesheet."""
+        return ""
     
     def set_valid_nodes(self, node_ids):
         """Set the valid node IDs for validation."""

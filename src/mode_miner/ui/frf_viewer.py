@@ -68,10 +68,10 @@ class FRFViewerWidget(QWidget):
         
         layout.addLayout(header_layout)
         
-        # Matplotlib figure
-        self._figure = Figure(figsize=(8, 3), facecolor='#1a1a2e')
+        # Matplotlib figure - professional dark theme
+        self._figure = Figure(figsize=(8, 3), facecolor='#1e1e1e')
         self._canvas = FigureCanvas(self._figure)
-        self._canvas.setStyleSheet("background-color: #1a1a2e;")
+        self._canvas.setStyleSheet("background-color: #1e1e1e;")
         layout.addWidget(self._canvas)
         
         # Create axes
@@ -87,16 +87,16 @@ class FRFViewerWidget(QWidget):
         self._show_placeholder()
     
     def _setup_axes(self):
-        """Configure axes appearance."""
-        self._ax.set_facecolor('#16213e')
-        self._ax.set_xlabel('Frequency (Hz)', color='white', fontsize=10)
-        self._ax.set_ylabel('Magnitude (v/F)', color='white', fontsize=10)
-        self._ax.tick_params(colors='white', labelsize=9)
-        self._ax.spines['bottom'].set_color('#4a4a6a')
-        self._ax.spines['top'].set_color('#4a4a6a')
-        self._ax.spines['left'].set_color('#4a4a6a')
-        self._ax.spines['right'].set_color('#4a4a6a')
-        self._ax.grid(True, alpha=0.3, color='#4a4a6a')
+        """Configure axes appearance - professional dark theme."""
+        self._ax.set_facecolor('#252526')
+        self._ax.set_xlabel('Frequency (Hz)', color='#d4d4d4', fontsize=10)
+        self._ax.set_ylabel('Magnitude (v/F)', color='#d4d4d4', fontsize=10)
+        self._ax.tick_params(colors='#808080', labelsize=9)
+        self._ax.spines['bottom'].set_color('#3c3c3c')
+        self._ax.spines['top'].set_color('#3c3c3c')
+        self._ax.spines['left'].set_color('#3c3c3c')
+        self._ax.spines['right'].set_color('#3c3c3c')
+        self._ax.grid(True, alpha=0.3, color='#3c3c3c', linestyle='-')
     
     def _show_placeholder(self):
         """Show placeholder text when no data."""
@@ -106,7 +106,7 @@ class FRFViewerWidget(QWidget):
             0.5, 0.5, 
             "Select input/response DOFs and compute FRF",
             ha='center', va='center',
-            color='#606060', fontsize=12,
+            color='#6e6e6e', fontsize=11,
             transform=self._ax.transAxes
         )
         self._canvas.draw()
@@ -142,20 +142,20 @@ class FRFViewerWidget(QWidget):
             self._show_placeholder()
             return
         
-        # Plot magnitude
+        # Plot magnitude - cyan/blue line for professional look
         self._ax.semilogy(
             self._frequencies, self._magnitude,
-            color='#00d4ff', linewidth=1.5, label='|H(f)|'
+            color='#4fc3f7', linewidth=1.5, label='|H(f)|'
         )
         
-        # Mark peaks
+        # Mark peaks - orange accent
         if self._peaks:
             peak_freqs = [p[0] for p in self._peaks]
             peak_mags = [p[1] for p in self._peaks]
             self._ax.scatter(
                 peak_freqs, peak_mags,
-                color='#ff6b6b', s=50, zorder=5,
-                marker='o', edgecolors='white', linewidths=1
+                color='#ff9800', s=50, zorder=5,
+                marker='o', edgecolors='#1e1e1e', linewidths=1
             )
         
         # Draw cursor if set
@@ -173,8 +173,8 @@ class FRFViewerWidget(QWidget):
         
         ylim = self._ax.get_ylim()
         self._cursor_line = self._ax.axvline(
-            self._cursor_freq, color='#ffcc00', linewidth=2,
-            linestyle='--', alpha=0.8
+            self._cursor_freq, color='#ff9800', linewidth=2,
+            linestyle='-', alpha=0.9
         )
     
     def set_cursor_frequency(self, freq: float):

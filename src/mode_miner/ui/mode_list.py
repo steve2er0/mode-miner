@@ -44,26 +44,13 @@ class ModeListWidget(QWidget):
         
         self._header = QLabel("Mode List")
         self._header.setFont(QFont("", -1, QFont.Bold))
-        self._header.setStyleSheet("color: #e0e0e0; font-size: 13px;")
+        self._header.setStyleSheet("color: #569cd6; font-size: 12px;")
         header_layout.addWidget(self._header)
         
         header_layout.addStretch()
         
-        # Show all button (hidden by default)
+        # Show all button (hidden by default) - uses main stylesheet
         self._show_all_btn = QPushButton("Show All")
-        self._show_all_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #0f3460;
-                color: #e0e0e0;
-                border: 1px solid #4a4a6a;
-                border-radius: 3px;
-                padding: 4px 8px;
-                font-size: 11px;
-            }
-            QPushButton:hover {
-                background-color: #1a4a7a;
-            }
-        """)
         self._show_all_btn.clicked.connect(self.show_all_modes)
         self._show_all_btn.hide()
         header_layout.addWidget(self._show_all_btn)
@@ -72,7 +59,7 @@ class ModeListWidget(QWidget):
         
         # Filter indicator
         self._filter_label = QLabel("")
-        self._filter_label.setStyleSheet("color: #ffcc00; font-size: 11px;")
+        self._filter_label.setStyleSheet("color: #ff9800; font-size: 11px;")
         self._filter_label.hide()
         layout.addWidget(self._filter_label)
         

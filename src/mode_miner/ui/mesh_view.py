@@ -44,12 +44,13 @@ class MeshView(QWidget):
         self._layout.setContentsMargins(0, 0, 0, 0)
         
         # Create matplotlib figure and canvas
-        self._figure = Figure(facecolor='#1a1a2e')
+        self._figure = Figure(facecolor='#1e1e1e')
+        self._figure.subplots_adjust(left=0, right=1, top=1, bottom=0)
         self._canvas = FigureCanvas(self._figure)
         self._layout.addWidget(self._canvas)
         
-        # Create 3D axes
-        self._ax = self._figure.add_subplot(111, projection='3d')
+        # Create 3D axes - expanded bounds to fill more space
+        self._ax = self._figure.add_axes([-0.15, -0.1, 1.3, 1.2], projection='3d')
         self._setup_axes()
         
         # Mesh data
@@ -82,26 +83,98 @@ class MeshView(QWidget):
         self._response_grid_id: Optional[int] = None
         self._response_component: Optional[int] = None
         
+        # Constraint display
+        self._show_constraints = True
+        self._constrained_nodes: Set[int] = set()
+        
         # Model bounding box for scaling
         self._model_diagonal = 1.0
+        
+        # Store view angles for triad sync
+        self._current_elev = 30
+        self._current_azim = -60
+        
+        # Create coordinate triad inset axes (bottom-left corner)
+        self._triad_ax = self._figure.add_axes([0.02, 0.02, 0.12, 0.12], projection='3d')
+        self._setup_triad_axes()
+        
+        # Connect mouse events for view synchronization
+        self._canvas.mpl_connect('motion_notify_event', self._on_mouse_move)
         
         self._canvas.draw()
     
     def _setup_axes(self):
-        """Configure axes appearance."""
-        self._ax.set_facecolor('#16213e')
-        self._ax.set_xlabel('X', color='white', fontsize=10)
-        self._ax.set_ylabel('Y', color='white', fontsize=10)
-        self._ax.set_zlabel('Z', color='white', fontsize=10)
-        self._ax.tick_params(colors='white', labelsize=9)
+        """Configure axes appearance - hide all decorations."""
+        self._ax.set_facecolor('#2d2d2d')
         
+        # Hide all axes elements
+        self._ax.set_axis_off()
+        
+        # Hide panes
         self._ax.xaxis.pane.fill = False
         self._ax.yaxis.pane.fill = False
         self._ax.zaxis.pane.fill = False
+        self._ax.xaxis.pane.set_edgecolor('none')
+        self._ax.yaxis.pane.set_edgecolor('none')
+        self._ax.zaxis.pane.set_edgecolor('none')
         
-        self._ax.xaxis._axinfo['grid']['color'] = (0.3, 0.3, 0.4, 0.3)
-        self._ax.yaxis._axinfo['grid']['color'] = (0.3, 0.3, 0.4, 0.3)
-        self._ax.zaxis._axinfo['grid']['color'] = (0.3, 0.3, 0.4, 0.3)
+        # Hide grid
+        self._ax.grid(False)
+    
+    def _setup_triad_axes(self):
+        """Setup the coordinate triad inset axes."""
+        ax = self._triad_ax
+        ax.set_facecolor('#1e1e1e')
+        ax.set_axis_off()
+        ax.xaxis.pane.fill = False
+        ax.yaxis.pane.fill = False
+        ax.zaxis.pane.fill = False
+        ax.grid(False)
+        self._draw_triad()
+        ax.view_init(elev=30, azim=-60)
+    
+    def _draw_triad(self):
+        """Draw XYZ coordinate arrows in triad axes."""
+        ax = self._triad_ax
+        ax.cla()
+        ax.set_axis_off()
+        ax.set_facecolor('#1e1e1e')
+        
+        arrow_length = 0.8
+        
+        # X axis - Red
+        ax.quiver(0, 0, 0, arrow_length, 0, 0, color='#ff6b6b', 
+                  arrow_length_ratio=0.2, linewidth=2)
+        ax.text(arrow_length * 1.1, 0, 0, 'X', color='#ff6b6b', 
+                fontsize=9, fontweight='bold')
+        
+        # Y axis - Green
+        ax.quiver(0, 0, 0, 0, arrow_length, 0, color='#4ec9b0',
+                  arrow_length_ratio=0.2, linewidth=2)
+        ax.text(0, arrow_length * 1.1, 0, 'Y', color='#4ec9b0',
+                fontsize=9, fontweight='bold')
+        
+        # Z axis - Blue
+        ax.quiver(0, 0, 0, 0, 0, arrow_length, color='#569cd6',
+                  arrow_length_ratio=0.2, linewidth=2)
+        ax.text(0, 0, arrow_length * 1.1, 'Z', color='#569cd6',
+                fontsize=9, fontweight='bold')
+        
+        ax.set_xlim(-1, 1)
+        ax.set_ylim(-1, 1)
+        ax.set_zlim(-1, 1)
+        ax.set_box_aspect([1, 1, 1])
+    
+    def _on_mouse_move(self, event):
+        """Sync triad view with main axes on mouse interaction."""
+        if hasattr(self._ax, 'elev') and hasattr(self._ax, 'azim'):
+            new_elev = self._ax.elev
+            new_azim = self._ax.azim
+            if new_elev != self._current_elev or new_azim != self._current_azim:
+                self._current_elev = new_elev
+                self._current_azim = new_azim
+                self._triad_ax.view_init(elev=new_elev, azim=new_azim)
+                self._canvas.draw_idle()
     
     def set_mesh(self, bdf_data: BDFData):
         """Set the mesh to display."""
@@ -115,6 +188,9 @@ class MeshView(QWidget):
         self._node_id_to_idx = {
             int(nid): idx for idx, nid in enumerate(bdf_data.node_ids)
         }
+        
+        # Store constrained nodes
+        self._constrained_nodes = bdf_data.constrained_nodes
         
         # Compute model bounding box diagonal for scaling
         bbox = np.max(self._base_points, axis=0) - np.min(self._base_points, axis=0)
@@ -161,18 +237,32 @@ class MeshView(QWidget):
         if points is None:
             return
         
+        # Preserve current view angles
+        if hasattr(self._ax, 'elev') and hasattr(self._ax, 'azim'):
+            self._current_elev = self._ax.elev
+            self._current_azim = self._ax.azim
+        
         self._ax.clear()
         self._setup_axes()
+        
+        # Restore view angles
+        self._ax.view_init(elev=self._current_elev, azim=self._current_azim)
         
         # Render mesh
         self._render_mesh_faces(points)
         
         # Render overlays
+        self._render_constraints(points)
         self._render_grid_markers(points)
         self._render_force_arrow(points)
         self._render_response_marker(points)
         
         self._set_axis_limits(points)
+        
+        # Sync triad with main view
+        self._draw_triad()
+        self._triad_ax.view_init(elev=self._current_elev, azim=self._current_azim)
+        
         self._canvas.draw()
     
     def _render_mesh_faces(self, points: np.ndarray):
@@ -196,8 +286,8 @@ class MeshView(QWidget):
         if normal_verts:
             self._poly_collection = Poly3DCollection(
                 normal_verts,
-                facecolors='steelblue',
-                edgecolors='#4a4a6a',
+                facecolors='#4a90a4',
+                edgecolors='#2c5d6b',
                 linewidths=0.3,
                 alpha=0.7
             )
@@ -207,8 +297,8 @@ class MeshView(QWidget):
         if highlight_verts:
             self._highlight_collection = Poly3DCollection(
                 highlight_verts,
-                facecolors='#ff6b6b',
-                edgecolors='white',
+                facecolors='#e07020',
+                edgecolors='#ffaa66',
                 linewidths=1.0,
                 alpha=0.95
             )
@@ -230,8 +320,8 @@ class MeshView(QWidget):
             marker_size = max(50, 200 * (self._model_diagonal / 10))
             self._ax.scatter(
                 coords[:, 0], coords[:, 1], coords[:, 2],
-                c='#00ff88', s=marker_size, marker='o',
-                edgecolors='white', linewidths=1.5,
+                c='#4ec9b0', s=marker_size, marker='o',
+                edgecolors='#ffaa66', linewidths=1.5,
                 alpha=0.9, zorder=10
             )
     
@@ -259,7 +349,7 @@ class MeshView(QWidget):
         
         # Check if rotational DOF
         is_rotation = self._force_component in [4, 5, 6]
-        color = '#9933ff' if not is_rotation else '#cc66ff'
+        color = '#569cd6' if not is_rotation else '#6bb5e0'
         
         # Draw arrow using quiver
         self._ax.quiver(
@@ -299,8 +389,8 @@ class MeshView(QWidget):
         # Use diamond marker for response
         self._ax.scatter(
             [pos[0]], [pos[1]], [pos[2]],
-            c='#ffcc00', s=marker_size, marker='D',
-            edgecolors='white', linewidths=2,
+            c='#dcdcaa', s=marker_size, marker='D',
+            edgecolors='#ffaa66', linewidths=2,
             alpha=0.95, zorder=12
         )
         
@@ -314,7 +404,7 @@ class MeshView(QWidget):
                 direction[0] * arrow_length,
                 direction[1] * arrow_length,
                 direction[2] * arrow_length,
-                color='#ffcc00', arrow_length_ratio=0.4,
+                color='#dcdcaa', arrow_length_ratio=0.4,
                 linewidth=2, alpha=0.8, zorder=13
             )
         
@@ -324,9 +414,39 @@ class MeshView(QWidget):
         offset = 0.03 * self._model_diagonal
         self._ax.text(
             pos[0] + offset, pos[1] + offset, pos[2] + offset,
-            label, color='#ffcc00', fontsize=10, fontweight='bold',
+            label, color='#dcdcaa', fontsize=10, fontweight='bold',
             zorder=14
         )
+    
+    def _render_constraints(self, points: np.ndarray):
+        """Render constraint markers at constrained nodes."""
+        if not self._show_constraints or not self._constrained_nodes:
+            return
+        
+        constraint_coords = []
+        for nid in self._constrained_nodes:
+            if nid in self._node_id_to_idx:
+                idx = self._node_id_to_idx[nid]
+                constraint_coords.append(points[idx])
+        
+        if not constraint_coords:
+            return
+        
+        coords = np.array(constraint_coords)
+        marker_size = max(80, 180 * (self._model_diagonal / 10))
+        
+        # Gold triangular markers for constraints (grounded look)
+        self._ax.scatter(
+            coords[:, 0], coords[:, 1], coords[:, 2],
+            c='#d4a017', s=marker_size, marker='^',
+            edgecolors='#1e1e1e', linewidths=1.5,
+            alpha=0.9, zorder=8
+        )
+    
+    def set_show_constraints(self, show: bool):
+        """Toggle constraint marker visibility."""
+        self._show_constraints = show
+        self._render_full()
     
     def _set_axis_limits(self, points: np.ndarray):
         """Set axis limits based on points."""

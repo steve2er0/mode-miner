@@ -30,6 +30,8 @@ class BDFData:
         property_to_elements: Mapping from property ID to set of element IDs
         material_to_elements: Mapping from material ID to set of element IDs
         property_to_material: Mapping from property ID to material ID(s)
+        constrained_nodes: Set of node IDs with constraints (SPC)
+        node_constraints: Mapping from node ID to constrained DOF components (1-6)
     """
     node_ids: np.ndarray
     node_coords: np.ndarray
@@ -39,6 +41,8 @@ class BDFData:
     property_to_elements: Dict[int, Set[int]] = field(default_factory=dict)
     material_to_elements: Dict[int, Set[int]] = field(default_factory=dict)
     property_to_material: Dict[int, Set[int]] = field(default_factory=dict)
+    constrained_nodes: Set[int] = field(default_factory=set)
+    node_constraints: Dict[int, Set[int]] = field(default_factory=dict)
 
 
 def load_bdf_mesh(bdf_path: str) -> BDFData:
@@ -65,6 +69,9 @@ def load_bdf_mesh(bdf_path: str) -> BDFData:
     # Build property and material mappings
     prop_to_elem, mat_to_elem, prop_to_mat = _build_property_material_maps(bdf)
     
+    # Extract constraints
+    constrained_nodes, node_constraints = _extract_constraints(bdf)
+    
     return BDFData(
         node_ids=node_ids,
         node_coords=node_coords,
@@ -73,7 +80,9 @@ def load_bdf_mesh(bdf_path: str) -> BDFData:
         cell_idx_to_element_id=cell_to_elem,
         property_to_elements=prop_to_elem,
         material_to_elements=mat_to_elem,
-        property_to_material=prop_to_mat
+        property_to_material=prop_to_mat,
+        constrained_nodes=constrained_nodes,
+        node_constraints=node_constraints
     )
 
 
@@ -209,6 +218,56 @@ def _build_property_material_maps(bdf: BDF) -> Tuple[
             mat_to_elem[mid].update(elem_ids)
     
     return prop_to_elem, mat_to_elem, prop_to_mat
+
+
+def _extract_constraints(bdf: BDF) -> Tuple[Set[int], Dict[int, Set[int]]]:
+    """Extract SPC constraint information from BDF.
+    
+    Returns:
+        Tuple of (constrained_nodes set, node_to_dofs mapping)
+    """
+    constrained_nodes: Set[int] = set()
+    node_constraints: Dict[int, Set[int]] = {}
+    
+    # Parse SPC cards (single point constraints with explicit values)
+    for spc_id, spc_list in getattr(bdf, 'spcs', {}).items():
+        for spc in spc_list:
+            if hasattr(spc, 'node_ids') and hasattr(spc, 'components'):
+                for nid, comp in zip(spc.node_ids, spc.components):
+                    constrained_nodes.add(nid)
+                    if nid not in node_constraints:
+                        node_constraints[nid] = set()
+                    # Parse components string (e.g., "123" for DOFs 1,2,3)
+                    for c in str(comp):
+                        if c.isdigit():
+                            node_constraints[nid].add(int(c))
+    
+    # Parse SPC1 cards (single point constraint for multiple nodes)
+    for spc_id, spc1_list in getattr(bdf, 'spc1s', {}).items():
+        for spc1 in spc1_list:
+            if hasattr(spc1, 'node_ids') and hasattr(spc1, 'components'):
+                components = str(spc1.components)
+                for nid in spc1.node_ids:
+                    constrained_nodes.add(nid)
+                    if nid not in node_constraints:
+                        node_constraints[nid] = set()
+                    for c in components:
+                        if c.isdigit():
+                            node_constraints[nid].add(int(c))
+    
+    # Also check for GRID cards with PS field (permanent constraints)
+    for nid, node in bdf.nodes.items():
+        if hasattr(node, 'ps') and node.ps:
+            ps = str(node.ps)
+            if ps and ps != '0':
+                constrained_nodes.add(nid)
+                if nid not in node_constraints:
+                    node_constraints[nid] = set()
+                for c in ps:
+                    if c.isdigit() and c != '0':
+                        node_constraints[nid].add(int(c))
+    
+    return constrained_nodes, node_constraints
 
 
 def get_element_subset_mesh(

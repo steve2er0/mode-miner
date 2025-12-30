@@ -48,25 +48,13 @@ class ModelTreeWidget(QWidget):
         
         header = QLabel("Model Tree")
         header.setFont(QFont("", -1, QFont.Bold))
-        header.setStyleSheet("color: #e0e0e0; font-size: 13px; padding: 4px;")
+        header.setStyleSheet("color: #569cd6; font-size: 12px; padding: 4px;")
         header_layout.addWidget(header)
         
         header_layout.addStretch()
         
-        self._clear_btn = QPushButton("Clear Selection")
-        self._clear_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #0f3460;
-                color: #e0e0e0;
-                border: 1px solid #4a4a6a;
-                border-radius: 3px;
-                padding: 3px 8px;
-                font-size: 11px;
-            }
-            QPushButton:hover {
-                background-color: #1a4a7a;
-            }
-        """)
+        # Clear button uses main stylesheet
+        self._clear_btn = QPushButton("Clear")
         self._clear_btn.clicked.connect(self._on_clear_clicked)
         self._clear_btn.hide()
         header_layout.addWidget(self._clear_btn)
@@ -77,26 +65,7 @@ class ModelTreeWidget(QWidget):
         self._tree = QTreeWidget()
         self._tree.setHeaderHidden(True)
         self._tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self._tree.setStyleSheet("""
-            QTreeWidget {
-                background-color: #16213e;
-                color: #e0e0e0;
-                border: 1px solid #4a4a6a;
-                border-radius: 4px;
-            }
-            QTreeWidget::item {
-                padding: 2px 4px;
-            }
-            QTreeWidget::item:selected {
-                background-color: #0f3460;
-            }
-            QTreeWidget::item:hover {
-                background-color: #1a1a4e;
-            }
-            QTreeWidget::branch {
-                background-color: #16213e;
-            }
-        """)
+        # Styling is inherited from main window stylesheet
         self._tree.itemSelectionChanged.connect(self._on_selection_changed)
         layout.addWidget(self._tree)
     

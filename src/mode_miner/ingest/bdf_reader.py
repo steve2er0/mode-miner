@@ -3,18 +3,8 @@
 from dataclasses import dataclass, field
 from typing import Dict, List, Set, Tuple, Optional
 import numpy as np
-import pyvista as pv
 
 from pyNastran.bdf.bdf import BDF
-
-
-# PyVista cell type codes
-VTK_TRIANGLE = 5
-VTK_QUAD = 9
-VTK_TETRA = 10
-VTK_HEXAHEDRON = 12
-VTK_WEDGE = 13
-VTK_PYRAMID = 14
 
 
 @dataclass
@@ -24,9 +14,10 @@ class BDFData:
     Attributes:
         node_ids: Array of grid point IDs in order
         node_coords: Array of node coordinates, shape (n_nodes, 3)
-        mesh: PyVista UnstructuredGrid for visualization
-        element_id_to_cell_idx: Mapping from NASTRAN element ID to VTK cell index
-        cell_idx_to_element_id: Mapping from VTK cell index to NASTRAN element ID
+        cells: List of cell connectivity (each cell is list of node indices)
+        cell_types: Array of cell type codes
+        element_id_to_cell_idx: Mapping from NASTRAN element ID to cell index
+        cell_idx_to_element_id: Mapping from cell index to NASTRAN element ID
         property_to_elements: Mapping from property ID to set of element IDs
         material_to_elements: Mapping from material ID to set of element IDs
         property_to_material: Mapping from property ID to material ID(s)
@@ -35,7 +26,8 @@ class BDFData:
     """
     node_ids: np.ndarray
     node_coords: np.ndarray
-    mesh: pv.UnstructuredGrid
+    cells: List[List[int]]  # List of cells, each cell is list of node indices
+    cell_types: np.ndarray  # Cell type codes
     element_id_to_cell_idx: Dict[int, int] = field(default_factory=dict)
     cell_idx_to_element_id: Dict[int, int] = field(default_factory=dict)
     property_to_elements: Dict[int, Set[int]] = field(default_factory=dict)
@@ -43,6 +35,20 @@ class BDFData:
     property_to_material: Dict[int, Set[int]] = field(default_factory=dict)
     constrained_nodes: Set[int] = field(default_factory=set)
     node_constraints: Dict[int, Set[int]] = field(default_factory=dict)
+    
+    @property
+    def n_cells(self) -> int:
+        """Number of cells/elements in the mesh."""
+        return len(self.cells)
+
+
+# Cell type codes (VTK-compatible)
+VTK_TRIANGLE = 5
+VTK_QUAD = 9
+VTK_TETRA = 10
+VTK_HEXAHEDRON = 12
+VTK_WEDGE = 13
+VTK_PYRAMID = 14
 
 
 def load_bdf_mesh(bdf_path: str) -> BDFData:
@@ -52,7 +58,7 @@ def load_bdf_mesh(bdf_path: str) -> BDFData:
         bdf_path: Path to BDF file
         
     Returns:
-        BDFData containing node info, PyVista mesh, and element mappings
+        BDFData containing node info, mesh cells, and element mappings
     """
     bdf = BDF()
     bdf.read_bdf(bdf_path, punch=False)
@@ -64,7 +70,7 @@ def load_bdf_mesh(bdf_path: str) -> BDFData:
     node_id_to_idx = {nid: idx for idx, nid in enumerate(node_ids)}
     
     # Extract elements and build mesh with mappings
-    mesh, elem_to_cell, cell_to_elem = _build_mesh(bdf, node_coords, node_id_to_idx)
+    cells, cell_types, elem_to_cell, cell_to_elem = _build_mesh(bdf, node_id_to_idx)
     
     # Build property and material mappings
     prop_to_elem, mat_to_elem, prop_to_mat = _build_property_material_maps(bdf)
@@ -75,7 +81,8 @@ def load_bdf_mesh(bdf_path: str) -> BDFData:
     return BDFData(
         node_ids=node_ids,
         node_coords=node_coords,
-        mesh=mesh,
+        cells=cells,
+        cell_types=cell_types,
         element_id_to_cell_idx=elem_to_cell,
         cell_idx_to_element_id=cell_to_elem,
         property_to_elements=prop_to_elem,
@@ -101,10 +108,9 @@ def _extract_nodes(bdf: BDF) -> Tuple[np.ndarray, np.ndarray]:
 
 def _build_mesh(
     bdf: BDF, 
-    node_coords: np.ndarray,
     node_id_to_idx: Dict[int, int]
-) -> Tuple[pv.UnstructuredGrid, Dict[int, int], Dict[int, int]]:
-    """Build PyVista mesh from BDF elements with ID mappings."""
+) -> Tuple[List[List[int]], np.ndarray, Dict[int, int], Dict[int, int]]:
+    """Build mesh cell data from BDF elements with ID mappings."""
     cells = []
     cell_types = []
     elem_to_cell = {}  # element_id -> cell_idx
@@ -132,7 +138,7 @@ def _build_mesh(
             
             try:
                 indices = [node_id_to_idx[nid] for nid in elem_nodes]
-                cells.append([len(indices)] + indices)
+                cells.append(indices)
                 cell_types.append(vtk_type)
                 
                 # Store mappings
@@ -143,20 +149,7 @@ def _build_mesh(
             except KeyError:
                 continue
     
-    if not cells:
-        return pv.UnstructuredGrid(), {}, {}
-    
-    cells_flat = []
-    for cell in cells:
-        cells_flat.extend(cell)
-    
-    mesh = pv.UnstructuredGrid(
-        np.array(cells_flat, dtype=np.int64),
-        np.array(cell_types, dtype=np.uint8),
-        node_coords
-    )
-    
-    return mesh, elem_to_cell, cell_to_elem
+    return cells, np.array(cell_types, dtype=np.uint8), elem_to_cell, cell_to_elem
 
 
 def _build_property_material_maps(bdf: BDF) -> Tuple[
@@ -268,32 +261,3 @@ def _extract_constraints(bdf: BDF) -> Tuple[Set[int], Dict[int, Set[int]]]:
                         node_constraints[nid].add(int(c))
     
     return constrained_nodes, node_constraints
-
-
-def get_element_subset_mesh(
-    bdf_data: BDFData, 
-    element_ids: Set[int]
-) -> Optional[pv.UnstructuredGrid]:
-    """Extract a subset mesh containing only specified elements.
-    
-    Args:
-        bdf_data: BDF data with mappings
-        element_ids: Set of NASTRAN element IDs to extract
-        
-    Returns:
-        PyVista mesh containing only the specified elements, or None if empty
-    """
-    if not element_ids:
-        return None
-    
-    # Convert element IDs to cell indices
-    cell_indices = []
-    for eid in element_ids:
-        if eid in bdf_data.element_id_to_cell_idx:
-            cell_indices.append(bdf_data.element_id_to_cell_idx[eid])
-    
-    if not cell_indices:
-        return None
-    
-    # Extract subset using PyVista
-    return bdf_data.mesh.extract_cells(cell_indices)

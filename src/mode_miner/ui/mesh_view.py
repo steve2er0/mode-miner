@@ -208,26 +208,14 @@ class MeshView(QWidget):
         faces = []
         face_to_elem = {}
         
-        mesh = bdf_data.mesh
-        if mesh.n_cells == 0:
+        if bdf_data.n_cells == 0:
             return faces, face_to_elem
         
-        cells = mesh.cells
-        i = 0
-        face_idx = 0
-        cell_idx = 0
-        
-        while i < len(cells):
-            n_verts = cells[i]
-            face_indices = cells[i+1:i+1+n_verts]
-            faces.append(face_indices)
+        for cell_idx, cell in enumerate(bdf_data.cells):
+            faces.append(cell)
             
             if cell_idx in bdf_data.cell_idx_to_element_id:
-                face_to_elem[face_idx] = bdf_data.cell_idx_to_element_id[cell_idx]
-            
-            i += n_verts + 1
-            face_idx += 1
-            cell_idx += 1
+                face_to_elem[cell_idx] = bdf_data.cell_idx_to_element_id[cell_idx]
         
         return faces, face_to_elem
     
@@ -290,8 +278,8 @@ class MeshView(QWidget):
                 edgecolors='#2c5d6b',
                 linewidths=0.3,
                 alpha=0.7
-            )
-            self._ax.add_collection3d(self._poly_collection)
+        )
+        self._ax.add_collection3d(self._poly_collection)
         
         # Highlighted elements
         if highlight_verts:

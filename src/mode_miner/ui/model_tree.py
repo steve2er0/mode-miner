@@ -139,7 +139,7 @@ class ModelTreeWidget(QWidget):
             grids_item.addChild(child)
         
         # === ELEMENTS ===
-        n_elements = self._bdf_data.mesh.n_cells
+        n_elements = self._bdf_data.n_cells
         elements_item = QTreeWidgetItem([f"Elements ({n_elements})"])
         elements_item.setData(0, 256, "elements_root")
         self._tree.addTopLevelItem(elements_item)

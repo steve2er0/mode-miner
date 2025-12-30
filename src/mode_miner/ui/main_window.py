@@ -416,7 +416,7 @@ class MainWindow(QMainWindow):
             self._dof_selector.set_valid_nodes(self._bdf_data.node_ids)
             
             n_nodes = len(self._bdf_data.node_ids)
-            n_cells = self._bdf_data.mesh.n_cells
+            n_cells = self._bdf_data.n_cells
             self._update_status(f"Loaded: {n_nodes} nodes, {n_cells} elements (load OP2 for modes)")
             
         except Exception as e:

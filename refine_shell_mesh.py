@@ -261,15 +261,11 @@ def get_or_create_midpoint_node(
     new_nid = id_alloc.allocate_grid_id()
     xyz = compute_midpoint(model, n1, n2)
     
-    # Get coordinate system from one of the parent nodes (typically 0)
-    parent_grid = model.nodes[n1]
-    cp = parent_grid.cp
-    cd = parent_grid.cd
-    ps = parent_grid.ps
-    seid = parent_grid.seid
-    
-    # Add the new GRID card
-    model.add_grid(new_nid, xyz, cp=cp, cd=cd, ps=ps, seid=seid)
+    # Create new node in basic/global coordinate system (CP=0, CD=0)
+    # This is safest since midpoint xyz is computed from raw coordinates.
+    # Note: If original nodes use non-zero CP (local coordinate input), the
+    # midpoint calculation may be incorrect. Most FEMAP exports use CP=0.
+    model.add_grid(new_nid, xyz, cp=0, cd=0, ps=0, seid=0)
     
     # Cache and track
     edge_cache.set_midpoint(n1, n2, new_nid)
@@ -301,14 +297,8 @@ def create_centroid_node(
     new_nid = id_alloc.allocate_grid_id()
     xyz = compute_centroid_quad(model, nodes)
     
-    # Get coordinate system from first corner node
-    parent_grid = model.nodes[nodes[0]]
-    cp = parent_grid.cp
-    cd = parent_grid.cd
-    ps = parent_grid.ps
-    seid = parent_grid.seid
-    
-    model.add_grid(new_nid, xyz, cp=cp, cd=cd, ps=ps, seid=seid)
+    # Create new node in basic/global coordinate system (CP=0, CD=0)
+    model.add_grid(new_nid, xyz, cp=0, cd=0, ps=0, seid=0)
     stats.nodes_added += 1
     
     return new_nid

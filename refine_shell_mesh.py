@@ -545,6 +545,9 @@ def run_refinement_pass(
     # Get current element IDs (copy to avoid modification during iteration)
     current_eids = list(model.elements.keys())
     
+    # Track edge lengths for diagnostics
+    all_edge_lengths = []
+    
     for eid in current_eids:
         elem = model.elements[eid]
         
@@ -554,6 +557,7 @@ def run_refinement_pass(
                 continue
             
             max_edge = compute_max_edge_length_quad(model, list(elem.nodes))
+            all_edge_lengths.append(max_edge)
             if max_edge > target_edge_length:
                 split_cquad4(model, elem, edge_cache, id_alloc, stats,
                            elements_to_remove, new_elements)
@@ -564,9 +568,18 @@ def run_refinement_pass(
                 continue
             
             max_edge = compute_max_edge_length_tri(model, list(elem.nodes))
+            all_edge_lengths.append(max_edge)
             if max_edge > target_edge_length:
                 split_ctria3(model, elem, edge_cache, id_alloc, stats,
                            elements_to_remove, new_elements)
+    
+    # Log edge length diagnostics
+    if logger and all_edge_lengths:
+        min_len = min(all_edge_lengths)
+        max_len = max(all_edge_lengths)
+        avg_len = sum(all_edge_lengths) / len(all_edge_lengths)
+        logger.info(f"  Edge lengths: min={min_len:.4f}, max={max_len:.4f}, avg={avg_len:.4f}")
+        logger.info(f"  Target: {target_edge_length}, Elements exceeding: {stats.elements_split}")
     
     # Remove original elements
     for eid in elements_to_remove:
@@ -600,6 +613,16 @@ def run_refinement_pass(
                 T2=elem_def['T2'],
                 T3=elem_def['T3'],
             )
+    
+    # Re-cross-reference the model so new nodes work with get_position()
+    # This is needed for subsequent passes to correctly compute edge lengths
+    if new_elements:
+        try:
+            model.cross_reference()
+        except Exception:
+            # If cross-referencing fails, continue anyway - new nodes have CP=0
+            # so their xyz values are already in global coordinates
+            pass
     
     return stats
 

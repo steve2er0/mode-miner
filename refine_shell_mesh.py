@@ -36,7 +36,6 @@ import argparse
 import logging
 import math
 import sys
-from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
@@ -57,65 +56,78 @@ EdgeKey = Tuple[NodeId, NodeId]  # Sorted tuple of node IDs
 Coord3D = np.ndarray  # Shape (3,)
 
 
-@dataclass
 class RefinementStats:
     """Statistics for a single refinement pass."""
-    elements_split: int = 0
-    nodes_added: int = 0
-    elements_added: int = 0
-    elements_removed: int = 0
+    
+    def __init__(self):
+        # type: () -> None
+        self.elements_split = 0
+        self.nodes_added = 0
+        self.elements_added = 0
+        self.elements_removed = 0
 
 
-@dataclass
 class IdAllocator:
     """
     Efficient ID allocator that maintains counters for new GRID and element IDs.
     Avoids O(N) max() calls in loops.
     """
-    next_grid_id: NodeId
-    next_element_id: ElementId
     
-    def allocate_grid_id(self) -> NodeId:
+    def __init__(self, next_grid_id, next_element_id):
+        # type: (NodeId, ElementId) -> None
+        self.next_grid_id = next_grid_id
+        self.next_element_id = next_element_id
+    
+    def allocate_grid_id(self):
+        # type: () -> NodeId
         """Allocate and return the next available GRID ID."""
         gid = self.next_grid_id
         self.next_grid_id += 1
         return gid
     
-    def allocate_element_id(self) -> ElementId:
+    def allocate_element_id(self):
+        # type: () -> ElementId
         """Allocate and return the next available element ID."""
         eid = self.next_element_id
         self.next_element_id += 1
         return eid
 
 
-@dataclass
 class EdgeCache:
     """
     Cache for edge midpoint nodes to ensure conformal mesh.
     Key: sorted tuple of (node_id_1, node_id_2)
     Value: midpoint node ID
     """
-    _cache: Dict[EdgeKey, NodeId] = field(default_factory=dict)
+    
+    def __init__(self):
+        # type: () -> None
+        self._cache = {}  # type: Dict[EdgeKey, NodeId]
     
     @staticmethod
-    def make_edge_key(n1: NodeId, n2: NodeId) -> EdgeKey:
+    def make_edge_key(n1, n2):
+        # type: (NodeId, NodeId) -> EdgeKey
         """Create a canonical edge key (sorted tuple)."""
         return (min(n1, n2), max(n1, n2))
     
-    def get_midpoint(self, n1: NodeId, n2: NodeId) -> Optional[NodeId]:
+    def get_midpoint(self, n1, n2):
+        # type: (NodeId, NodeId) -> Optional[NodeId]
         """Get cached midpoint node ID for an edge, or None if not cached."""
         key = self.make_edge_key(n1, n2)
         return self._cache.get(key)
     
-    def set_midpoint(self, n1: NodeId, n2: NodeId, mid_id: NodeId) -> None:
+    def set_midpoint(self, n1, n2, mid_id):
+        # type: (NodeId, NodeId, NodeId) -> None
         """Cache the midpoint node ID for an edge."""
         key = self.make_edge_key(n1, n2)
         self._cache[key] = mid_id
     
-    def __len__(self) -> int:
+    def __len__(self):
+        # type: () -> int
         return len(self._cache)
     
-    def clear(self) -> None:
+    def clear(self):
+        # type: () -> None
         """Clear the cache for a new pass."""
         self._cache.clear()
 

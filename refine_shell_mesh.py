@@ -32,8 +32,6 @@ NOTES:
 Author: Mesh Refinement Tool v1.0
 """
 
-from __future__ import annotations
-
 import argparse
 import logging
 import math

@@ -671,23 +671,35 @@ def refine_mesh(
     # Initialize ID allocators
     max_grid_id = max(model.nodes.keys()) if model.nodes else 0
     max_elem_id = max(model.elements.keys()) if model.elements else 0
+    existing_nids = set(model.nodes.keys())
+    existing_eids = set(model.elements.keys())
     
     # Use user-specified starting IDs if provided, otherwise start after max existing
-    actual_start_nid = start_nid if start_nid is not None else (max_grid_id + 1)
-    actual_start_eid = start_eid if start_eid is not None else (max_elem_id + 1)
-    
-    # Validate that starting IDs don't conflict with existing IDs
-    if actual_start_nid <= max_grid_id:
-        logger.warning(f"⚠ start_nid ({actual_start_nid}) <= max existing NID ({max_grid_id}). "
-                      f"Using {max_grid_id + 1} instead to avoid conflicts.")
+    if start_nid is not None:
+        actual_start_nid = start_nid
+        # Only warn if the specific starting ID already exists (actual collision)
+        if actual_start_nid in existing_nids:
+            logger.warning(f"⚠ start_nid ({actual_start_nid}) already exists in model! "
+                          f"May cause ID collisions.")
+        else:
+            logger.info(f"Using user-specified start_nid: {actual_start_nid}")
+    else:
         actual_start_nid = max_grid_id + 1
-    if actual_start_eid <= max_elem_id:
-        logger.warning(f"⚠ start_eid ({actual_start_eid}) <= max existing EID ({max_elem_id}). "
-                      f"Using {max_elem_id + 1} instead to avoid conflicts.")
+    
+    if start_eid is not None:
+        actual_start_eid = start_eid
+        # Only warn if the specific starting ID already exists (actual collision)
+        if actual_start_eid in existing_eids:
+            logger.warning(f"⚠ start_eid ({actual_start_eid}) already exists in model! "
+                          f"May cause ID collisions.")
+        else:
+            logger.info(f"Using user-specified start_eid: {actual_start_eid}")
+    else:
         actual_start_eid = max_elem_id + 1
     
     logger.info(f"New node IDs will start at: {actual_start_nid}")
     logger.info(f"New element IDs will start at: {actual_start_eid}")
+    logger.info(f"(Existing model: max NID={max_grid_id}, max EID={max_elem_id})")
     
     id_alloc = IdAllocator(
         next_grid_id=actual_start_nid,

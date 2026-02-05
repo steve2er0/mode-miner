@@ -766,6 +766,27 @@ def refine_mesh(
     else:
         logger.warning(f"✗ {violations} elements still exceed target edge length")
     
+    # Check for ID overflow (8-character field limit = 99999999)
+    MAX_ID = 99999999
+    max_nid = max(model.nodes.keys()) if model.nodes else 0
+    max_eid = max(model.elements.keys()) if model.elements else 0
+    
+    if max_nid > MAX_ID:
+        logger.error(f"✗ GRID IDs exceed 8-character limit! Max NID: {max_nid}")
+        logger.error("  Consider starting with a model that has smaller node IDs.")
+    elif max_nid > MAX_ID // 10:
+        logger.warning(f"⚠ GRID IDs getting large ({max_nid}). May cause issues with more refinement.")
+    else:
+        logger.info(f"✓ GRID IDs within safe range (max: {max_nid})")
+    
+    if max_eid > MAX_ID:
+        logger.error(f"✗ Element IDs exceed 8-character limit! Max EID: {max_eid}")
+        logger.error("  Consider starting with a model that has smaller element IDs.")
+    elif max_eid > MAX_ID // 10:
+        logger.warning(f"⚠ Element IDs getting large ({max_eid}). May cause issues with more refinement.")
+    else:
+        logger.info(f"✓ Element IDs within safe range (max: {max_eid})")
+    
     # Write output
     logger.info(f"\nWriting refined BDF: {output_file}")
     
@@ -776,7 +797,8 @@ def refine_mesh(
     # 3. After refinement, create new load cards for child elements
     # This is left as a future enhancement.
     
-    model.write_bdf(output_file)
+    # Write with explicit small field format (8-character fields) for FEMAP compatibility
+    model.write_bdf(output_file, size=8, is_double=False)
     logger.info("Done.")
     
     total_stats['initial_nodes'] = initial_nodes

@@ -615,6 +615,8 @@ def refine_mesh(
     max_passes: int = 10,
     pids: Optional[List[int]] = None,
     eid_range: Optional[Tuple[int, int]] = None,
+    start_nid: Optional[int] = None,
+    start_eid: Optional[int] = None,
     verbose: bool = False
 ) -> Dict:
     """
@@ -627,6 +629,8 @@ def refine_mesh(
         max_passes: Maximum number of refinement passes
         pids: Optional list of property IDs to refine
         eid_range: Optional (min, max) element ID range to refine
+        start_nid: Optional starting node ID for new nodes (default: max+1)
+        start_eid: Optional starting element ID for new elements (default: max+1)
         verbose: Enable verbose logging
         
     Returns:
@@ -668,9 +672,26 @@ def refine_mesh(
     max_grid_id = max(model.nodes.keys()) if model.nodes else 0
     max_elem_id = max(model.elements.keys()) if model.elements else 0
     
+    # Use user-specified starting IDs if provided, otherwise start after max existing
+    actual_start_nid = start_nid if start_nid is not None else (max_grid_id + 1)
+    actual_start_eid = start_eid if start_eid is not None else (max_elem_id + 1)
+    
+    # Validate that starting IDs don't conflict with existing IDs
+    if actual_start_nid <= max_grid_id:
+        logger.warning(f"⚠ start_nid ({actual_start_nid}) <= max existing NID ({max_grid_id}). "
+                      f"Using {max_grid_id + 1} instead to avoid conflicts.")
+        actual_start_nid = max_grid_id + 1
+    if actual_start_eid <= max_elem_id:
+        logger.warning(f"⚠ start_eid ({actual_start_eid}) <= max existing EID ({max_elem_id}). "
+                      f"Using {max_elem_id + 1} instead to avoid conflicts.")
+        actual_start_eid = max_elem_id + 1
+    
+    logger.info(f"New node IDs will start at: {actual_start_nid}")
+    logger.info(f"New element IDs will start at: {actual_start_eid}")
+    
     id_alloc = IdAllocator(
-        next_grid_id=max_grid_id + 1,
-        next_element_id=max_elem_id + 1
+        next_grid_id=actual_start_nid,
+        next_element_id=actual_start_eid
     )
     
     edge_cache = EdgeCache()
@@ -973,6 +994,7 @@ Examples:
   python refine_shell_mesh.py --in model.bdf --out refined.bdf --target 2.5
   python refine_shell_mesh.py -i model.bdf -o refined.bdf -t 2.5 -m 8 -p 10,12,15
   python refine_shell_mesh.py --in model.bdf --out refined.bdf --target 2.5 --eid-range 1000:5000
+  python refine_shell_mesh.py --in model.bdf --out refined.bdf --target 2.5 --start-nid 9800001 --start-eid 9800001
   python refine_shell_mesh.py --test  # Run unit test
         """
     )
@@ -989,6 +1011,10 @@ Examples:
                         help='Comma-separated list of property IDs to refine')
     parser.add_argument('--eid-range', '-e', type=str,
                         help='Element ID range to refine (format: START:END)')
+    parser.add_argument('--start-nid', type=int,
+                        help='Starting node ID for new nodes (default: max_existing + 1)')
+    parser.add_argument('--start-eid', type=int,
+                        help='Starting element ID for new elements (default: max_existing + 1)')
     parser.add_argument('--verbose', '-v', action='store_true',
                         help='Enable verbose logging')
     parser.add_argument('--test', action='store_true',
@@ -1022,6 +1048,8 @@ Examples:
             max_passes=args.max_passes,
             pids=pids,
             eid_range=eid_range,
+            start_nid=args.start_nid,
+            start_eid=args.start_eid,
             verbose=args.verbose
         )
     except FileNotFoundError as e:

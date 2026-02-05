@@ -134,17 +134,23 @@ class EdgeCache:
 
 def get_grid_xyz(model: BDF, nid: NodeId) -> Coord3D:
     """
-    Get the XYZ coordinates of a GRID node.
+    Get the XYZ coordinates of a GRID node in global coordinate system.
     
     Args:
-        model: pyNastran BDF model
+        model: pyNastran BDF model (must be cross-referenced)
         nid: Node ID
         
     Returns:
-        numpy array of shape (3,) with X, Y, Z coordinates
+        numpy array of shape (3,) with X, Y, Z coordinates in global CS
     """
     grid = model.nodes[nid]
-    return np.array(grid.xyz, dtype=float)
+    # Use get_position() to get global coordinates (handles CP transformation)
+    # This requires the model to be cross-referenced (xref=True)
+    try:
+        return grid.get_position()
+    except AttributeError:
+        # Fallback for non-cross-referenced models
+        return np.array(grid.xyz, dtype=float)
 
 
 def compute_edge_length(model: BDF, n1: NodeId, n2: NodeId) -> float:
@@ -636,9 +642,11 @@ def refine_mesh(
     
     logger.info(f"Reading BDF: {input_file}")
     
-    # Read BDF without cross-referencing
+    # Read BDF with cross-referencing to handle coordinate systems properly
+    # This enables get_position() to return global coordinates for nodes
+    # defined in local coordinate systems (CP != 0)
     model = BDF(debug=False)
-    model.read_bdf(input_file, xref=False)
+    model.read_bdf(input_file, xref=True)
     
     # Initial counts
     initial_nodes = len(model.nodes)

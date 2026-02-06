@@ -547,6 +547,35 @@ def split_cbar(
     # Get or create midpoint node (shared via edge cache)
     nm = get_or_create_midpoint_node(model, ga, gb, edge_cache, id_alloc, stats)
     
+    # Validate orientation - G0 cannot be one of the child element's nodes
+    # If G0 is the midpoint or one of the original nodes, we have a problem
+    if g0 is not None and g0 in (ga, gb, nm):
+        # G0 conflicts with element nodes - convert to X vector instead
+        # Calculate the orientation vector from parent element
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"CBAR {eid}: G0={g0} conflicts with element nodes. "
+                      f"Converting to X vector orientation.")
+        try:
+            # Get positions of the nodes to compute a perpendicular vector
+            ga_pos = get_grid_xyz(model, ga)
+            gb_pos = get_grid_xyz(model, gb)
+            g0_pos = get_grid_xyz(model, g0)
+            # Original orientation vector from element axis to G0
+            axis = gb_pos - ga_pos
+            axis = axis / np.linalg.norm(axis)
+            to_g0 = g0_pos - ga_pos
+            # Project out the axial component to get perpendicular direction
+            x_vec = to_g0 - np.dot(to_g0, axis) * axis
+            if np.linalg.norm(x_vec) > 1e-10:
+                x = list(x_vec / np.linalg.norm(x_vec))
+            else:
+                x = [0.0, 0.0, 1.0]  # Default if G0 is on element axis
+            g0 = None
+        except Exception:
+            x = [0.0, 0.0, 1.0]  # Fallback default orientation
+            g0 = None
+    
     # Mark original element for removal
     elements_to_remove.add(eid)
     stats.elements_split += 1
@@ -618,6 +647,34 @@ def split_cbeam(
     
     # Get or create midpoint node (shared via edge cache)
     nm = get_or_create_midpoint_node(model, ga, gb, edge_cache, id_alloc, stats)
+    
+    # Validate orientation - G0 cannot be one of the child element's nodes
+    # If G0 is the midpoint or one of the original nodes, we have a problem
+    if g0 is not None and g0 in (ga, gb, nm):
+        # G0 conflicts with element nodes - convert to X vector instead
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"CBEAM {eid}: G0={g0} conflicts with element nodes. "
+                      f"Converting to X vector orientation.")
+        try:
+            # Get positions of the nodes to compute a perpendicular vector
+            ga_pos = get_grid_xyz(model, ga)
+            gb_pos = get_grid_xyz(model, gb)
+            g0_pos = get_grid_xyz(model, g0)
+            # Original orientation vector from element axis to G0
+            axis = gb_pos - ga_pos
+            axis = axis / np.linalg.norm(axis)
+            to_g0 = g0_pos - ga_pos
+            # Project out the axial component to get perpendicular direction
+            x_vec = to_g0 - np.dot(to_g0, axis) * axis
+            if np.linalg.norm(x_vec) > 1e-10:
+                x = list(x_vec / np.linalg.norm(x_vec))
+            else:
+                x = [0.0, 0.0, 1.0]  # Default if G0 is on element axis
+            g0 = None
+        except Exception:
+            x = [0.0, 0.0, 1.0]  # Fallback default orientation
+            g0 = None
     
     # Mark original element for removal
     elements_to_remove.add(eid)

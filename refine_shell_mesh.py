@@ -270,19 +270,17 @@ def get_or_create_midpoint_node(
     new_nid = id_alloc.allocate_grid_id()
     xyz = compute_midpoint(model, n1, n2)
     
-    # Get coordinate system from parent nodes (use n1's coordinate system)
-    # This preserves the coordinate system context for the midpoint
+    # Inherit the analysis coordinate system (CD) from the parent nodes
+    # If both parents have the same CD, use that; otherwise use CD=0
     grid1 = model.nodes[n1]
-    cp = getattr(grid1, 'cp', 0)
-    cd = getattr(grid1, 'cd', 0)
+    grid2 = model.nodes[n2]
+    cd1 = getattr(grid1, 'cd', 0) if hasattr(grid1, 'cd') else 0
+    cd2 = getattr(grid2, 'cd', 0) if hasattr(grid2, 'cd') else 0
+    cd = cd1 if cd1 == cd2 else 0
     
-    # Handle case where cp/cd might be a reference object after cross-referencing
-    if hasattr(cp, 'cid'):
-        cp = cp.cid
-    if hasattr(cd, 'cid'):
-        cd = cd.cid
-    
-    model.add_grid(new_nid, xyz, cp=cp, cd=cd, ps=0, seid=0)
+    # Create new node with inherited CD (analysis coordinate system)
+    # CP=0 since xyz is computed in global coordinates via get_position()
+    model.add_grid(new_nid, xyz, cp=0, cd=cd, ps=0, seid=0)
     
     # Cache and track
     edge_cache.set_midpoint(n1, n2, new_nid)
@@ -645,9 +643,9 @@ def split_cbar(
     wb_effective = wb if wb is not None else zero_offset
     
     # Create 2 child bars
-    # Both children inherit parent's WA and WB directly
+    # Both children inherit parent's WA and WB to preserve offsets through refinement chain
     for child_nodes, pa_child, pb_child in [
-        ([ga, nm], pa, 0),
+        ([ga, nm], pa, 0), 
         ([nm, gb], 0, pb)
     ]:
         new_eid = id_alloc.allocate_element_id()
@@ -806,9 +804,9 @@ def split_cbeam(
     wb_effective = wb if wb is not None else zero_offset
     
     # Create 2 child beams
-    # Both children inherit parent's WA and WB directly
+    # Both children inherit parent's WA and WB to preserve offsets through refinement chain
     for child_nodes, pa_child, pb_child, sa_child, sb_child in [
-        ([ga, nm], pa, 0, sa, 0),
+        ([ga, nm], pa, 0, sa, 0), 
         ([nm, gb], 0, pb, 0, sb)
     ]:
         new_eid = id_alloc.allocate_element_id()

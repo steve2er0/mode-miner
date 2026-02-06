@@ -734,9 +734,9 @@ def split_cbar(
     import logging
     logger = logging.getLogger(__name__)
     if g0 is not None:
-        logger.info(f"CBAR {eid}: Splitting - parent uses G0 orientation (g0={g0}), x={x}")
+        logger.debug(f"CBAR {eid}: Splitting - parent uses G0 orientation (g0={g0}), x={x}")
     else:
-        logger.info(f"CBAR {eid}: Splitting - parent uses X vector orientation: x={x} (X1={x[0] if x else None}, X2={x[1] if x else None}, X3={x[2] if x else None})")
+        logger.debug(f"CBAR {eid}: Splitting - parent uses X vector orientation: x={x} (X1={x[0] if x else None}, X2={x[1] if x else None}, X3={x[2] if x else None})")
     
     # Get optional fields
     offt = getattr(elem, 'offt', 'GGG')
@@ -769,7 +769,7 @@ def split_cbar(
         except (IndexError, TypeError):
             wb = None
     
-    logger.info(f"CBAR {eid}: Parent offsets wa={wa}, wb={wb}")
+    logger.debug(f"CBAR {eid}: Parent offsets wa={wa}, wb={wb}")
     
     # Get or create midpoint node (shared via edge cache)
     nm = get_or_create_midpoint_node(model, ga, gb, edge_cache, id_alloc, stats)
@@ -807,9 +807,9 @@ def split_cbar(
     
     # Log final orientation being used for children
     if g0 is not None:
-        logger.info(f"CBAR {eid}: Children will use G0 orientation (g0={g0})")
+        logger.debug(f"CBAR {eid}: Children will use G0 orientation (g0={g0})")
     else:
-        logger.info(f"CBAR {eid}: Children will use X vector orientation: x={x}")
+        logger.debug(f"CBAR {eid}: Children will use X vector orientation: x={x}")
     
     # Use [0,0,0] for no offset (not None) to ensure pyNastran writes the values correctly
     zero_offset = [0.0, 0.0, 0.0]
@@ -829,8 +829,8 @@ def split_cbar(
     wa_global = transform_offset_to_global(model, ga, wa_effective)
     wb_global = transform_offset_to_global(model, gb, wb_effective)
     
-    logger.info(f"CBAR {eid}: WA={wa_effective} (local) -> {list(wa_global)} (global)")
-    logger.info(f"CBAR {eid}: WB={wb_effective} (local) -> {list(wb_global)} (global)")
+    logger.debug(f"CBAR {eid}: WA={wa_effective} (local) -> {list(wa_global)} (global)")
+    logger.debug(f"CBAR {eid}: WB={wb_effective} (local) -> {list(wb_global)} (global)")
     
     # Compute physical beam centerline positions in global
     centerline_a = ga_pos + wa_global
@@ -842,7 +842,7 @@ def split_cbar(
     # Midpoint offset in global = centerline position - node position
     wm_global = centerline_mid - nm_pos
     
-    logger.info(f"CBAR {eid}: Midpoint offset (global): {list(wm_global)}")
+    logger.debug(f"CBAR {eid}: Midpoint offset (global): {list(wm_global)}")
     
     # Transform offsets to each child node's coordinate system
     child1_wa = wa_effective
@@ -851,8 +851,8 @@ def split_cbar(
     child2_wa = transform_offset_from_global(model, nm, wm_global)
     child2_wb = wb_effective
     
-    logger.info(f"CBAR {eid}: Child1 WA={child1_wa}, WB={child1_wb}")
-    logger.info(f"CBAR {eid}: Child2 WA={child2_wa}, WB={child2_wb}")
+    logger.debug(f"CBAR {eid}: Child1 WA={child1_wa}, WB={child1_wb}")
+    logger.debug(f"CBAR {eid}: Child2 WA={child2_wa}, WB={child2_wb}")
     
     # Build child data
     child_data = [
@@ -899,9 +899,9 @@ def split_cbar(
                         x_child2 = list(-e_r)
                         g0_child2 = None  # Clear G0 when using computed X
                         
-                        logger.info(f"CBAR {eid}: Recomputing X for child 2 (GA in cylindrical CD={ga_cd})")
-                        logger.info(f"  Parent X = {x} (parallel to cyl axis {list(cyl_axis)})")
-                        logger.info(f"  Child 2 X = {x_child2} (negative radial at theta={ga_pos_local[1]:.1f}°)")
+                        logger.debug(f"CBAR {eid}: Recomputing X for child 2 (GA in cylindrical CD={ga_cd})")
+                        logger.debug(f"  Parent X = {x} (parallel to cyl axis {list(cyl_axis)})")
+                        logger.debug(f"  Child 2 X = {x_child2} (negative radial at theta={ga_pos_local[1]:.1f}°)")
                     except Exception as e:
                         logger.warning(f"CBAR {eid}: Failed to recompute X for child 2: {e}")
     
@@ -924,7 +924,7 @@ def split_cbar(
             'wa': cd['wa'],
             'wb': cd['wb'],
         })
-        logger.info(f"  -> Child CBAR {new_eid}: nodes={cd['nodes']}, x={child_x}, wa={cd['wa']}, wb={cd['wb']}")
+        logger.debug(f"  -> Child CBAR {new_eid}: nodes={cd['nodes']}, x={child_x}, wa={cd['wa']}, wb={cd['wb']}")
         stats.elements_added += 1
 
 
@@ -981,9 +981,9 @@ def split_cbeam(
     import logging
     logger = logging.getLogger(__name__)
     if g0 is not None:
-        logger.info(f"CBEAM {eid}: Splitting - parent uses G0 orientation (g0={g0}), x={x}")
+        logger.debug(f"CBEAM {eid}: Splitting - parent uses G0 orientation (g0={g0}), x={x}")
     else:
-        logger.info(f"CBEAM {eid}: Splitting - parent uses X vector orientation: x={x} (X1={x[0] if x else None}, X2={x[1] if x else None}, X3={x[2] if x else None})")
+        logger.debug(f"CBEAM {eid}: Splitting - parent uses X vector orientation: x={x} (X1={x[0] if x else None}, X2={x[1] if x else None}, X3={x[2] if x else None})")
     
     # Get optional fields
     offt = getattr(elem, 'offt', 'GGG')
@@ -1019,7 +1019,7 @@ def split_cbeam(
         except (IndexError, TypeError):
             wb = None
     
-    logger.info(f"CBEAM {eid}: Parent offsets wa={wa}, wb={wb}")
+    logger.debug(f"CBEAM {eid}: Parent offsets wa={wa}, wb={wb}")
     
     # Get or create midpoint node (shared via edge cache)
     nm = get_or_create_midpoint_node(model, ga, gb, edge_cache, id_alloc, stats)
@@ -1056,9 +1056,9 @@ def split_cbeam(
     
     # Log final orientation being used for children
     if g0 is not None:
-        logger.info(f"CBEAM {eid}: Children will use G0 orientation (g0={g0})")
+        logger.debug(f"CBEAM {eid}: Children will use G0 orientation (g0={g0})")
     else:
-        logger.info(f"CBEAM {eid}: Children will use X vector orientation: x={x}")
+        logger.debug(f"CBEAM {eid}: Children will use X vector orientation: x={x}")
     
     # Use [0,0,0] for no offset (not None) to ensure pyNastran writes the values correctly
     zero_offset = [0.0, 0.0, 0.0]
@@ -1087,8 +1087,8 @@ def split_cbeam(
     wa_global = transform_offset_to_global(model, ga, wa_effective)
     wb_global = transform_offset_to_global(model, gb, wb_effective)
     
-    logger.info(f"CBEAM {eid}: WA={wa_effective} (local) -> {list(wa_global)} (global)")
-    logger.info(f"CBEAM {eid}: WB={wb_effective} (local) -> {list(wb_global)} (global)")
+    logger.debug(f"CBEAM {eid}: WA={wa_effective} (local) -> {list(wa_global)} (global)")
+    logger.debug(f"CBEAM {eid}: WB={wb_effective} (local) -> {list(wb_global)} (global)")
     
     # Compute physical beam centerline positions in global
     centerline_a = ga_pos + wa_global
@@ -1100,8 +1100,8 @@ def split_cbeam(
     # Midpoint offset in global = centerline position - node position
     wm_global = centerline_mid - nm_pos
     
-    logger.info(f"CBEAM {eid}: Centerline at midpoint (global): {list(centerline_mid)}")
-    logger.info(f"CBEAM {eid}: Midpoint offset (global): {list(wm_global)}")
+    logger.debug(f"CBEAM {eid}: Centerline at midpoint (global): {list(centerline_mid)}")
+    logger.debug(f"CBEAM {eid}: Midpoint offset (global): {list(wm_global)}")
     
     # Transform offsets to each child node's coordinate system
     # Child 1: GA to NM - needs offsets in GA's CD and NM's CD
@@ -1115,8 +1115,8 @@ def split_cbeam(
     child2_wa = transform_offset_from_global(model, nm, wm_global)
     child2_wb = wb_effective
     
-    logger.info(f"CBEAM {eid}: Child1 WA={child1_wa}, WB={child1_wb}")
-    logger.info(f"CBEAM {eid}: Child2 WA={child2_wa}, WB={child2_wb}")
+    logger.debug(f"CBEAM {eid}: Child1 WA={child1_wa}, WB={child1_wb}")
+    logger.debug(f"CBEAM {eid}: Child2 WA={child2_wa}, WB={child2_wb}")
     
     # Build child data
     child_data = [
@@ -1163,9 +1163,9 @@ def split_cbeam(
                         x_child2 = list(-e_r)
                         g0_child2 = None  # Clear G0 when using computed X
                         
-                        logger.info(f"CBEAM {eid}: Recomputing X for child 2 (GA in cylindrical CD={ga_cd})")
-                        logger.info(f"  Parent X = {x} (parallel to cyl axis {list(cyl_axis)})")
-                        logger.info(f"  Child 2 X = {x_child2} (negative radial at theta={ga_pos_local[1]:.1f}°)")
+                        logger.debug(f"CBEAM {eid}: Recomputing X for child 2 (GA in cylindrical CD={ga_cd})")
+                        logger.debug(f"  Parent X = {x} (parallel to cyl axis {list(cyl_axis)})")
+                        logger.debug(f"  Child 2 X = {x_child2} (negative radial at theta={ga_pos_local[1]:.1f}°)")
                     except Exception as e:
                         logger.warning(f"CBEAM {eid}: Failed to recompute X for child 2: {e}")
     
@@ -1191,7 +1191,7 @@ def split_cbeam(
             'sa': cd['sa'],
             'sb': cd['sb'],
         })
-        logger.info(f"  -> Child CBEAM {new_eid}: nodes={cd['nodes']}, x={child_x}, wa={cd['wa']}, wb={cd['wb']}")
+        logger.debug(f"  -> Child CBEAM {new_eid}: nodes={cd['nodes']}, x={child_x}, wa={cd['wa']}, wb={cd['wb']}")
         stats.elements_added += 1
 
 
@@ -1603,15 +1603,29 @@ def refine_mesh(
     Returns:
         Dictionary with summary statistics
     """
-    # Setup logging
-    log_level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=log_level,
-        format='%(levelname)s: %(message)s'
-    )
+    # Setup logging - console at INFO, file at DEBUG for detailed 1D element diagnostics
     logger = logging.getLogger(__name__)
+    logger.setLevel(logging.DEBUG)  # Capture all levels
+    
+    # Console handler - INFO and above
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.DEBUG if verbose else logging.INFO)
+    console_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+    logger.addHandler(console_handler)
+    
+    # File handler - DEBUG and above (captures 1D element details)
+    import os
+    log_file = os.path.splitext(output_file)[0] + '_refinement.log'
+    file_handler = logging.FileHandler(log_file, mode='w')
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(message)s'))
+    logger.addHandler(file_handler)
+    
+    # Prevent propagation to root logger
+    logger.propagate = False
     
     logger.info(f"Reading BDF: {input_file}")
+    logger.info(f"Detailed 1D element log: {log_file}")
     
     # Read BDF with cross-referencing to handle coordinate systems properly
     # This enables get_position() to return global coordinates for nodes

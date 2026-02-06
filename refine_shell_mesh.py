@@ -637,10 +637,12 @@ def split_cbar(
     wb_effective = wb if wb is not None else zero_offset
     
     # Create 2 child bars
-    # Both children inherit parent's WA and WB to preserve offsets through refinement chain
-    for child_nodes, pa_child, pb_child in [
-        ([ga, nm], pa, 0), 
-        ([nm, gb], 0, pb)
+    # Child 1 [GA, midpoint]: contains original GA, so use parent's WA for both ends
+    # Child 2 [midpoint, GB]: contains original GB, so use parent's WB for both ends
+    # This preserves the offset characteristic from each original endpoint through the chain
+    for child_nodes, pa_child, pb_child, child_wa, child_wb in [
+        ([ga, nm], pa, 0, wa_effective, wa_effective),  # GA-side child uses WA
+        ([nm, gb], 0, pb, wb_effective, wb_effective)   # GB-side child uses WB
     ]:
         new_eid = id_alloc.allocate_element_id()
         new_elements.append({
@@ -653,10 +655,10 @@ def split_cbar(
             'offt': offt,
             'pa': pa_child,
             'pb': pb_child,
-            'wa': wa_effective,
-            'wb': wb_effective,
+            'wa': child_wa,
+            'wb': child_wb,
         })
-        logger.info(f"  -> Child CBAR {new_eid}: nodes={child_nodes}, x={x}, wa={wa_effective}, wb={wb_effective}")
+        logger.info(f"  -> Child CBAR {new_eid}: nodes={child_nodes}, x={x}, wa={child_wa}, wb={child_wb}")
         stats.elements_added += 1
 
 
@@ -798,10 +800,12 @@ def split_cbeam(
     wb_effective = wb if wb is not None else zero_offset
     
     # Create 2 child beams
-    # Both children inherit parent's WA and WB to preserve offsets through refinement chain
-    for child_nodes, pa_child, pb_child, sa_child, sb_child in [
-        ([ga, nm], pa, 0, sa, 0), 
-        ([nm, gb], 0, pb, 0, sb)
+    # Child 1 [GA, midpoint]: contains original GA, so use parent's WA for both ends
+    # Child 2 [midpoint, GB]: contains original GB, so use parent's WB for both ends
+    # This preserves the offset characteristic from each original endpoint through the chain
+    for child_nodes, pa_child, pb_child, sa_child, sb_child, child_wa, child_wb in [
+        ([ga, nm], pa, 0, sa, 0, wa_effective, wa_effective),  # GA-side child uses WA
+        ([nm, gb], 0, pb, 0, sb, wb_effective, wb_effective)   # GB-side child uses WB
     ]:
         new_eid = id_alloc.allocate_element_id()
         new_elements.append({
@@ -815,12 +819,12 @@ def split_cbeam(
             'bit': bit,
             'pa': pa_child,
             'pb': pb_child,
-            'wa': wa_effective,
-            'wb': wb_effective,
+            'wa': child_wa,
+            'wb': child_wb,
             'sa': sa_child,
             'sb': sb_child,
         })
-        logger.info(f"  -> Child CBEAM {new_eid}: nodes={child_nodes}, x={x}, wa={wa_effective}, wb={wb_effective}")
+        logger.info(f"  -> Child CBEAM {new_eid}: nodes={child_nodes}, x={x}, wa={child_wa}, wb={child_wb}")
         stats.elements_added += 1
 
 

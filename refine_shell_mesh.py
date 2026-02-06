@@ -642,20 +642,24 @@ def split_cbar(
     wa_effective = wa if wa is not None else zero_offset
     wb_effective = wb if wb is not None else zero_offset
     
-    # With OFFT='GGG' (default), offsets are already in GLOBAL coordinates
-    # So we just linearly interpolate them directly - no transformation needed
-    w_mid = [
-        (wa_effective[0] + wb_effective[0]) / 2.0,
-        (wa_effective[1] + wb_effective[1]) / 2.0,
-        (wa_effective[2] + wb_effective[2]) / 2.0,
-    ]
+    # OFFSET HANDLING: Use constant offset per segment from nearest original node
+    # Since FEMAP's interpolation algorithm is unknown and our linear interpolation
+    # produces values that don't match, we use each original node's offset for its segment.
+    # This ensures the beam centerline position is correct at the original endpoints,
+    # with each child segment using a constant offset along its length.
+    #
+    # Child 1 (GA to midpoint): uses WA throughout (offset from original start)
+    # Child 2 (midpoint to GB): uses WB throughout (offset from original end)
+    #
+    # This creates a step discontinuity at the midpoint, but is structurally conservative
+    # and avoids introducing coordinate transformation errors.
     
-    logger.info(f"CBAR {eid}: WA={wa_effective}, WB={wb_effective}, W_mid={w_mid}")
+    logger.info(f"CBAR {eid}: WA={wa_effective}, WB={wb_effective} (constant offset per segment)")
     
-    # Build child data - offsets stay in global coordinates
+    # Build child data - each segment uses offset from its nearest original node
     child_data = [
-        {'nodes': [ga, nm], 'wa': wa_effective, 'wb': w_mid, 'pa': pa, 'pb': 0},
-        {'nodes': [nm, gb], 'wa': w_mid, 'wb': wb_effective, 'pa': 0, 'pb': pb},
+        {'nodes': [ga, nm], 'wa': wa_effective, 'wb': wa_effective, 'pa': pa, 'pb': 0},
+        {'nodes': [nm, gb], 'wa': wb_effective, 'wb': wb_effective, 'pa': 0, 'pb': pb},
     ]
     
     # Create 2 child bars - keep parent's orientation (g0 or x)
@@ -815,20 +819,24 @@ def split_cbeam(
     wa_effective = wa if wa is not None else zero_offset
     wb_effective = wb if wb is not None else zero_offset
     
-    # With OFFT='GGG' (default), offsets are already in GLOBAL coordinates
-    # So we just linearly interpolate them directly - no transformation needed
-    w_mid = [
-        (wa_effective[0] + wb_effective[0]) / 2.0,
-        (wa_effective[1] + wb_effective[1]) / 2.0,
-        (wa_effective[2] + wb_effective[2]) / 2.0,
-    ]
+    # OFFSET HANDLING: Use constant offset per segment from nearest original node
+    # Since FEMAP's interpolation algorithm is unknown and our linear interpolation
+    # produces values that don't match, we use each original node's offset for its segment.
+    # This ensures the beam centerline position is correct at the original endpoints,
+    # with each child segment using a constant offset along its length.
+    #
+    # Child 1 (GA to midpoint): uses WA throughout (offset from original start)
+    # Child 2 (midpoint to GB): uses WB throughout (offset from original end)
+    #
+    # This creates a step discontinuity at the midpoint, but is structurally conservative
+    # and avoids introducing coordinate transformation errors.
     
-    logger.info(f"CBEAM {eid}: WA={wa_effective}, WB={wb_effective}, W_mid={w_mid}")
+    logger.info(f"CBEAM {eid}: WA={wa_effective}, WB={wb_effective} (constant offset per segment)")
     
-    # Build child data - offsets stay in global coordinates
+    # Build child data - each segment uses offset from its nearest original node
     child_data = [
-        {'nodes': [ga, nm], 'wa': wa_effective, 'wb': w_mid, 'pa': pa, 'pb': 0, 'sa': sa, 'sb': 0},
-        {'nodes': [nm, gb], 'wa': w_mid, 'wb': wb_effective, 'pa': 0, 'pb': pb, 'sa': 0, 'sb': sb},
+        {'nodes': [ga, nm], 'wa': wa_effective, 'wb': wa_effective, 'pa': pa, 'pb': 0, 'sa': sa, 'sb': 0},
+        {'nodes': [nm, gb], 'wa': wb_effective, 'wb': wb_effective, 'pa': 0, 'pb': pb, 'sa': 0, 'sb': sb},
     ]
     
     # Create 2 child beams - keep parent's orientation (g0 or x)

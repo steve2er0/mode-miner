@@ -270,11 +270,19 @@ def get_or_create_midpoint_node(
     new_nid = id_alloc.allocate_grid_id()
     xyz = compute_midpoint(model, n1, n2)
     
-    # Create new node in basic/global coordinate system (CP=0, CD=0)
-    # This is safest since midpoint xyz is computed from raw coordinates.
-    # Note: If original nodes use non-zero CP (local coordinate input), the
-    # midpoint calculation may be incorrect. Most FEMAP exports use CP=0.
-    model.add_grid(new_nid, xyz, cp=0, cd=0, ps=0, seid=0)
+    # Get coordinate system from parent nodes (use n1's coordinate system)
+    # This preserves the coordinate system context for the midpoint
+    grid1 = model.nodes[n1]
+    cp = getattr(grid1, 'cp', 0)
+    cd = getattr(grid1, 'cd', 0)
+    
+    # Handle case where cp/cd might be a reference object after cross-referencing
+    if hasattr(cp, 'cid'):
+        cp = cp.cid
+    if hasattr(cd, 'cid'):
+        cd = cd.cid
+    
+    model.add_grid(new_nid, xyz, cp=cp, cd=cd, ps=0, seid=0)
     
     # Cache and track
     edge_cache.set_midpoint(n1, n2, new_nid)
@@ -637,12 +645,10 @@ def split_cbar(
     wb_effective = wb if wb is not None else zero_offset
     
     # Create 2 child bars
-    # Child 1 [GA, midpoint]: WA=parent's WA, WB=parent's WA (both ends use GA offset)
-    # Child 2 [midpoint, GB]: WA=parent's WA, WB=parent's WB (preserves original endpoints)
-    # This propagates WA through the chain while preserving WB at the original GB
-    for child_nodes, pa_child, pb_child, child_wa, child_wb in [
-        ([ga, nm], pa, 0, wa_effective, wa_effective),  # GA-side: WA for both
-        ([nm, gb], 0, pb, wa_effective, wb_effective)   # GB-side: WA at GA, WB at GB
+    # Both children inherit parent's WA and WB directly
+    for child_nodes, pa_child, pb_child in [
+        ([ga, nm], pa, 0),
+        ([nm, gb], 0, pb)
     ]:
         new_eid = id_alloc.allocate_element_id()
         new_elements.append({
@@ -655,10 +661,10 @@ def split_cbar(
             'offt': offt,
             'pa': pa_child,
             'pb': pb_child,
-            'wa': child_wa,
-            'wb': child_wb,
+            'wa': wa_effective,
+            'wb': wb_effective,
         })
-        logger.info(f"  -> Child CBAR {new_eid}: nodes={child_nodes}, x={x}, wa={child_wa}, wb={child_wb}")
+        logger.info(f"  -> Child CBAR {new_eid}: nodes={child_nodes}, x={x}, wa={wa_effective}, wb={wb_effective}")
         stats.elements_added += 1
 
 
@@ -800,12 +806,10 @@ def split_cbeam(
     wb_effective = wb if wb is not None else zero_offset
     
     # Create 2 child beams
-    # Child 1 [GA, midpoint]: WA=parent's WA, WB=parent's WA (both ends use GA offset)
-    # Child 2 [midpoint, GB]: WA=parent's WA, WB=parent's WB (preserves original endpoints)
-    # This propagates WA through the chain while preserving WB at the original GB
-    for child_nodes, pa_child, pb_child, sa_child, sb_child, child_wa, child_wb in [
-        ([ga, nm], pa, 0, sa, 0, wa_effective, wa_effective),  # GA-side: WA for both
-        ([nm, gb], 0, pb, 0, sb, wa_effective, wb_effective)   # GB-side: WA at GA, WB at GB
+    # Both children inherit parent's WA and WB directly
+    for child_nodes, pa_child, pb_child, sa_child, sb_child in [
+        ([ga, nm], pa, 0, sa, 0),
+        ([nm, gb], 0, pb, 0, sb)
     ]:
         new_eid = id_alloc.allocate_element_id()
         new_elements.append({
@@ -819,12 +823,12 @@ def split_cbeam(
             'bit': bit,
             'pa': pa_child,
             'pb': pb_child,
-            'wa': child_wa,
-            'wb': child_wb,
+            'wa': wa_effective,
+            'wb': wb_effective,
             'sa': sa_child,
             'sb': sb_child,
         })
-        logger.info(f"  -> Child CBEAM {new_eid}: nodes={child_nodes}, x={x}, wa={child_wa}, wb={child_wb}")
+        logger.info(f"  -> Child CBEAM {new_eid}: nodes={child_nodes}, x={x}, wa={wa_effective}, wb={wb_effective}")
         stats.elements_added += 1
 
 

@@ -768,7 +768,7 @@ def run_refinement_pass(
     # the midpoint nodes from 2D refinement are already in the edge cache.
     # This maintains conformal mesh connectivity.
     
-    # --- PASS 1: Process 2D elements (CQUAD4, CTRIA3) ---
+    # --- PASS 1a: Process 2D elements based on edge length ---
     for eid in current_eids:
         elem = model.elements[eid]
         
@@ -793,6 +793,43 @@ def run_refinement_pass(
             if max_edge > target_edge_length:
                 split_ctria3(model, elem, edge_cache, id_alloc, stats,
                            elements_to_remove, new_elements)
+    
+    # --- PASS 1b: Closure pass - split 2D elements that share edges with midpoints ---
+    # This ensures conformal mesh: if element A was refined and created midpoints,
+    # adjacent element B must also be refined to use those midpoints (no free edges)
+    # Keep iterating until no more elements need closure refinement
+    closure_needed = True
+    while closure_needed:
+        closure_needed = False
+        for eid in current_eids:
+            if eid in elements_to_remove:
+                continue  # Already marked for removal
+            
+            elem = model.elements[eid]
+            
+            if isinstance(elem, CQUAD4):
+                # Check if any edge has a midpoint in cache
+                nodes = list(elem.nodes)
+                edges = [(nodes[0], nodes[1]), (nodes[1], nodes[2]), 
+                        (nodes[2], nodes[3]), (nodes[3], nodes[0])]
+                has_midpoint = any(edge_cache.get_midpoint(n1, n2) is not None 
+                                  for n1, n2 in edges)
+                if has_midpoint:
+                    split_cquad4(model, elem, edge_cache, id_alloc, stats,
+                               elements_to_remove, new_elements)
+                    closure_needed = True  # New midpoints may affect other elements
+            
+            elif isinstance(elem, CTRIA3):
+                # Check if any edge has a midpoint in cache
+                nodes = list(elem.nodes)
+                edges = [(nodes[0], nodes[1]), (nodes[1], nodes[2]), 
+                        (nodes[2], nodes[0])]
+                has_midpoint = any(edge_cache.get_midpoint(n1, n2) is not None 
+                                  for n1, n2 in edges)
+                if has_midpoint:
+                    split_ctria3(model, elem, edge_cache, id_alloc, stats,
+                               elements_to_remove, new_elements)
+                    closure_needed = True  # New midpoints may affect other elements
     
     # --- PASS 2: Process 1D elements (CBAR, CBEAM, CROD) ---
     # Now the edge cache has all midpoints from 2D refinement

@@ -637,12 +637,12 @@ def split_cbar(
     wb_effective = wb if wb is not None else zero_offset
     
     # Create 2 child bars
-    # Child 1 [GA, midpoint]: contains original GA, so use parent's WA for both ends
-    # Child 2 [midpoint, GB]: contains original GB, so use parent's WB for both ends
-    # This preserves the offset characteristic from each original endpoint through the chain
+    # Child 1 [GA, midpoint]: WA=parent's WA, WB=parent's WA (both ends use GA offset)
+    # Child 2 [midpoint, GB]: WA=parent's WA, WB=parent's WB (preserves original endpoints)
+    # This propagates WA through the chain while preserving WB at the original GB
     for child_nodes, pa_child, pb_child, child_wa, child_wb in [
-        ([ga, nm], pa, 0, wa_effective, wa_effective),  # GA-side child uses WA
-        ([nm, gb], 0, pb, wb_effective, wb_effective)   # GB-side child uses WB
+        ([ga, nm], pa, 0, wa_effective, wa_effective),  # GA-side: WA for both
+        ([nm, gb], 0, pb, wa_effective, wb_effective)   # GB-side: WA at GA, WB at GB
     ]:
         new_eid = id_alloc.allocate_element_id()
         new_elements.append({
@@ -800,12 +800,12 @@ def split_cbeam(
     wb_effective = wb if wb is not None else zero_offset
     
     # Create 2 child beams
-    # Child 1 [GA, midpoint]: contains original GA, so use parent's WA for both ends
-    # Child 2 [midpoint, GB]: contains original GB, so use parent's WB for both ends
-    # This preserves the offset characteristic from each original endpoint through the chain
+    # Child 1 [GA, midpoint]: WA=parent's WA, WB=parent's WA (both ends use GA offset)
+    # Child 2 [midpoint, GB]: WA=parent's WA, WB=parent's WB (preserves original endpoints)
+    # This propagates WA through the chain while preserving WB at the original GB
     for child_nodes, pa_child, pb_child, sa_child, sb_child, child_wa, child_wb in [
-        ([ga, nm], pa, 0, sa, 0, wa_effective, wa_effective),  # GA-side child uses WA
-        ([nm, gb], 0, pb, 0, sb, wb_effective, wb_effective)   # GB-side child uses WB
+        ([ga, nm], pa, 0, sa, 0, wa_effective, wa_effective),  # GA-side: WA for both
+        ([nm, gb], 0, pb, 0, sb, wa_effective, wb_effective)   # GB-side: WA at GA, WB at GB
     ]:
         new_eid = id_alloc.allocate_element_id()
         new_elements.append({

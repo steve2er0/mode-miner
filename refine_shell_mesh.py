@@ -553,7 +553,10 @@ def split_cbar(
     # Log parent orientation for debugging
     import logging
     logger = logging.getLogger(__name__)
-    logger.debug(f"CBAR {eid}: Parent orientation g0={g0}, x={x}")
+    if g0 is not None:
+        logger.info(f"CBAR {eid}: Splitting - parent uses G0 orientation (g0={g0}), x={x}")
+    else:
+        logger.info(f"CBAR {eid}: Splitting - parent uses X vector orientation: x={x} (X1={x[0] if x else None}, X2={x[1] if x else None}, X3={x[2] if x else None})")
     
     # Get optional fields
     offt = getattr(elem, 'offt', 'GGG')
@@ -586,7 +589,7 @@ def split_cbar(
         except (IndexError, TypeError):
             wb = None
     
-    logger.debug(f"CBAR {eid}: Parent offsets wa={wa}, wb={wb}")
+    logger.info(f"CBAR {eid}: Parent offsets wa={wa}, wb={wb}")
     
     # Get or create midpoint node (shared via edge cache)
     nm = get_or_create_midpoint_node(model, ga, gb, edge_cache, id_alloc, stats)
@@ -623,14 +626,22 @@ def split_cbar(
     stats.elements_split += 1
     
     # Log final orientation being used for children
-    logger.debug(f"CBAR {eid}: Child orientation will be g0={g0}, x={x}")
+    if g0 is not None:
+        logger.info(f"CBAR {eid}: Children will use G0 orientation (g0={g0})")
+    else:
+        logger.info(f"CBAR {eid}: Children will use X vector orientation: x={x}")
+    
+    # Use [0,0,0] for no offset (not None) to ensure pyNastran writes the values correctly
+    zero_offset = [0.0, 0.0, 0.0]
+    wa_effective = wa if wa is not None else zero_offset
+    wb_effective = wb if wb is not None else zero_offset
     
     # Create 2 child bars
-    # Child 1 [GA, NM]: wa = parent's wa, wb = None (no offset at midpoint)
-    # Child 2 [NM, GB]: wa = None, wb = parent's wb
+    # Child 1 [GA, NM]: wa = parent's wa, wb = [0,0,0] (no offset at midpoint)
+    # Child 2 [NM, GB]: wa = [0,0,0], wb = parent's wb
     for child_nodes, pa_child, pb_child, wa_child, wb_child in [
-        ([ga, nm], pa, 0, wa, None), 
-        ([nm, gb], 0, pb, None, wb)
+        ([ga, nm], pa, 0, wa_effective, zero_offset), 
+        ([nm, gb], 0, pb, zero_offset, wb_effective)
     ]:
         new_eid = id_alloc.allocate_element_id()
         new_elements.append({
@@ -646,7 +657,7 @@ def split_cbar(
             'wa': wa_child,
             'wb': wb_child,
         })
-        logger.debug(f"  Child CBAR {new_eid}: nodes={child_nodes}, g0={g0}, x={x}, wa={wa_child}, wb={wb_child}")
+        logger.info(f"  -> Child CBAR {new_eid}: nodes={child_nodes}, x={x}, wa={wa_child}, wb={wb_child}")
         stats.elements_added += 1
 
 
@@ -702,7 +713,10 @@ def split_cbeam(
     # Log parent orientation for debugging
     import logging
     logger = logging.getLogger(__name__)
-    logger.debug(f"CBEAM {eid}: Parent orientation g0={g0}, x={x}")
+    if g0 is not None:
+        logger.info(f"CBEAM {eid}: Splitting - parent uses G0 orientation (g0={g0}), x={x}")
+    else:
+        logger.info(f"CBEAM {eid}: Splitting - parent uses X vector orientation: x={x} (X1={x[0] if x else None}, X2={x[1] if x else None}, X3={x[2] if x else None})")
     
     # Get optional fields
     offt = getattr(elem, 'offt', 'GGG')
@@ -738,7 +752,7 @@ def split_cbeam(
         except (IndexError, TypeError):
             wb = None
     
-    logger.debug(f"CBEAM {eid}: Parent offsets wa={wa}, wb={wb}")
+    logger.info(f"CBEAM {eid}: Parent offsets wa={wa}, wb={wb}")
     
     # Get or create midpoint node (shared via edge cache)
     nm = get_or_create_midpoint_node(model, ga, gb, edge_cache, id_alloc, stats)
@@ -774,14 +788,22 @@ def split_cbeam(
     stats.elements_split += 1
     
     # Log final orientation being used for children
-    logger.debug(f"CBEAM {eid}: Child orientation will be g0={g0}, x={x}")
+    if g0 is not None:
+        logger.info(f"CBEAM {eid}: Children will use G0 orientation (g0={g0})")
+    else:
+        logger.info(f"CBEAM {eid}: Children will use X vector orientation: x={x}")
+    
+    # Use [0,0,0] for no offset (not None) to ensure pyNastran writes the values correctly
+    zero_offset = [0.0, 0.0, 0.0]
+    wa_effective = wa if wa is not None else zero_offset
+    wb_effective = wb if wb is not None else zero_offset
     
     # Create 2 child beams
-    # Child 1 [GA, NM]: wa = parent's wa, wb = None (no offset at midpoint)
-    # Child 2 [NM, GB]: wa = None, wb = parent's wb
+    # Child 1 [GA, NM]: wa = parent's wa, wb = [0,0,0] (no offset at midpoint)
+    # Child 2 [NM, GB]: wa = [0,0,0], wb = parent's wb
     for child_nodes, pa_child, pb_child, sa_child, sb_child, wa_child, wb_child in [
-        ([ga, nm], pa, 0, sa, 0, wa, None), 
-        ([nm, gb], 0, pb, 0, sb, None, wb)
+        ([ga, nm], pa, 0, sa, 0, wa_effective, zero_offset), 
+        ([nm, gb], 0, pb, 0, sb, zero_offset, wb_effective)
     ]:
         new_eid = id_alloc.allocate_element_id()
         new_elements.append({
@@ -800,7 +822,7 @@ def split_cbeam(
             'sa': sa_child,
             'sb': sb_child,
         })
-        logger.debug(f"  Child CBEAM {new_eid}: nodes={child_nodes}, g0={g0}, x={x}, wa={wa_child}, wb={wb_child}")
+        logger.info(f"  -> Child CBEAM {new_eid}: nodes={child_nodes}, x={x}, wa={wa_child}, wb={wb_child}")
         stats.elements_added += 1
 
 

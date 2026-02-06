@@ -637,11 +637,10 @@ def split_cbar(
     wb_effective = wb if wb is not None else zero_offset
     
     # Create 2 child bars
-    # Child 1 [GA, NM]: wa = parent's wa, wb = [0,0,0] (no offset at midpoint)
-    # Child 2 [NM, GB]: wa = [0,0,0], wb = parent's wb
-    for child_nodes, pa_child, pb_child, wa_child, wb_child in [
-        ([ga, nm], pa, 0, wa_effective, zero_offset), 
-        ([nm, gb], 0, pb, zero_offset, wb_effective)
+    # Both children inherit parent's WA and WB to preserve offsets through refinement chain
+    for child_nodes, pa_child, pb_child in [
+        ([ga, nm], pa, 0), 
+        ([nm, gb], 0, pb)
     ]:
         new_eid = id_alloc.allocate_element_id()
         new_elements.append({
@@ -654,10 +653,10 @@ def split_cbar(
             'offt': offt,
             'pa': pa_child,
             'pb': pb_child,
-            'wa': wa_child,
-            'wb': wb_child,
+            'wa': wa_effective,
+            'wb': wb_effective,
         })
-        logger.info(f"  -> Child CBAR {new_eid}: nodes={child_nodes}, x={x}, wa={wa_child}, wb={wb_child}")
+        logger.info(f"  -> Child CBAR {new_eid}: nodes={child_nodes}, x={x}, wa={wa_effective}, wb={wb_effective}")
         stats.elements_added += 1
 
 
@@ -799,11 +798,10 @@ def split_cbeam(
     wb_effective = wb if wb is not None else zero_offset
     
     # Create 2 child beams
-    # Child 1 [GA, NM]: wa = parent's wa, wb = [0,0,0] (no offset at midpoint)
-    # Child 2 [NM, GB]: wa = [0,0,0], wb = parent's wb
-    for child_nodes, pa_child, pb_child, sa_child, sb_child, wa_child, wb_child in [
-        ([ga, nm], pa, 0, sa, 0, wa_effective, zero_offset), 
-        ([nm, gb], 0, pb, 0, sb, zero_offset, wb_effective)
+    # Both children inherit parent's WA and WB to preserve offsets through refinement chain
+    for child_nodes, pa_child, pb_child, sa_child, sb_child in [
+        ([ga, nm], pa, 0, sa, 0), 
+        ([nm, gb], 0, pb, 0, sb)
     ]:
         new_eid = id_alloc.allocate_element_id()
         new_elements.append({
@@ -817,12 +815,12 @@ def split_cbeam(
             'bit': bit,
             'pa': pa_child,
             'pb': pb_child,
-            'wa': wa_child,
-            'wb': wb_child,
+            'wa': wa_effective,
+            'wb': wb_effective,
             'sa': sa_child,
             'sb': sb_child,
         })
-        logger.info(f"  -> Child CBEAM {new_eid}: nodes={child_nodes}, x={x}, wa={wa_child}, wb={wb_child}")
+        logger.info(f"  -> Child CBEAM {new_eid}: nodes={child_nodes}, x={x}, wa={wa_effective}, wb={wb_effective}")
         stats.elements_added += 1
 
 

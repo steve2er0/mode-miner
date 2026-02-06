@@ -45,6 +45,7 @@ try:
     from pyNastran.bdf.cards.elements.shell import CQUAD4, CTRIA3
     from pyNastran.bdf.cards.elements.bars import CBAR
     from pyNastran.bdf.cards.elements.beam import CBEAM
+    from pyNastran.bdf.cards.elements.rods import CROD
     from pyNastran.bdf.cards.nodes import GRID
 except ImportError:
     print("ERROR: pyNastran is required. Install with: pip install pyNastran")
@@ -647,6 +648,57 @@ def split_cbeam(
         stats.elements_added += 1
 
 
+def split_crod(
+    model: BDF,
+    elem: CROD,
+    edge_cache: EdgeCache,
+    id_alloc: IdAllocator,
+    stats: RefinementStats,
+    elements_to_remove: Set[ElementId],
+    new_elements: List[dict]
+) -> None:
+    """
+    Split a CROD into 2 child CROD elements.
+    
+    Split pattern:
+        GA -------- GB    becomes    GA ---- NM ---- GB
+        
+    Child rods:
+        R1: [GA, NM]  (first half)
+        R2: [NM, GB]  (second half)
+    
+    Args:
+        model: pyNastran BDF model
+        elem: CROD element to split
+        edge_cache: Edge midpoint cache
+        id_alloc: ID allocator
+        stats: Statistics tracker
+        elements_to_remove: Set to add original element ID to
+        new_elements: List to append new element definitions to
+    """
+    eid = elem.eid
+    pid = elem.pid
+    ga, gb = elem.nodes[:2]  # CROD nodes are [GA, GB]
+    
+    # Get or create midpoint node (shared via edge cache)
+    nm = get_or_create_midpoint_node(model, ga, gb, edge_cache, id_alloc, stats)
+    
+    # Mark original element for removal
+    elements_to_remove.add(eid)
+    stats.elements_split += 1
+    
+    # Create 2 child rods
+    for child_nodes in [[ga, nm], [nm, gb]]:
+        new_eid = id_alloc.allocate_element_id()
+        new_elements.append({
+            'type': 'CROD',
+            'eid': new_eid,
+            'pid': pid,
+            'nodes': child_nodes,
+        })
+        stats.elements_added += 1
+
+
 def should_refine_element(
     elem_id: ElementId,
     elem_pid: int,
@@ -757,6 +809,17 @@ def run_refinement_pass(
             if beam_length > target_edge_length:
                 split_cbeam(model, elem, edge_cache, id_alloc, stats,
                            elements_to_remove, new_elements)
+        
+        # Handle CROD
+        elif isinstance(elem, CROD):
+            if not should_refine_element(eid, elem.pid, pid_filter, eid_range):
+                continue
+            
+            rod_length = compute_bar_length(model, list(elem.nodes[:2]))
+            all_edge_lengths.append(rod_length)
+            if rod_length > target_edge_length:
+                split_crod(model, elem, edge_cache, id_alloc, stats,
+                          elements_to_remove, new_elements)
     
     # Log edge length diagnostics
     if logger and all_edge_lengths:
@@ -827,6 +890,12 @@ def run_refinement_pass(
                 sa=elem_def['sa'],
                 sb=elem_def['sb'],
             )
+        elif elem_def['type'] == 'CROD':
+            model.add_crod(
+                eid=elem_def['eid'],
+                pid=elem_def['pid'],
+                nids=elem_def['nodes'],
+            )
     
     # Re-cross-reference the model so new nodes work with get_position()
     # This is needed for subsequent passes to correctly compute edge lengths
@@ -894,10 +963,11 @@ def refine_mesh(
     initial_tris = sum(1 for e in model.elements.values() if isinstance(e, CTRIA3))
     initial_bars = sum(1 for e in model.elements.values() if isinstance(e, CBAR))
     initial_beams = sum(1 for e in model.elements.values() if isinstance(e, CBEAM))
+    initial_rods = sum(1 for e in model.elements.values() if isinstance(e, CROD))
     
     logger.info(f"Initial mesh: {initial_nodes} nodes, {initial_elements} elements")
     logger.info(f"  2D: {initial_quads} CQUAD4, {initial_tris} CTRIA3")
-    logger.info(f"  1D: {initial_bars} CBAR, {initial_beams} CBEAM")
+    logger.info(f"  1D: {initial_bars} CBAR, {initial_beams} CBEAM, {initial_rods} CROD")
     logger.info(f"Target edge length: {target_edge_length}")
     logger.info(f"Max passes: {max_passes}")
     
@@ -992,6 +1062,7 @@ def refine_mesh(
     final_tris = sum(1 for e in model.elements.values() if isinstance(e, CTRIA3))
     final_bars = sum(1 for e in model.elements.values() if isinstance(e, CBAR))
     final_beams = sum(1 for e in model.elements.values() if isinstance(e, CBEAM))
+    final_rods = sum(1 for e in model.elements.values() if isinstance(e, CROD))
     
     # Summary
     logger.info("\n" + "="*50)
@@ -1001,7 +1072,7 @@ def refine_mesh(
     logger.info(f"Nodes: {initial_nodes} -> {final_nodes} (+{final_nodes - initial_nodes})")
     logger.info(f"Elements: {initial_elements} -> {final_elements}")
     logger.info(f"  2D: CQUAD4 {initial_quads} -> {final_quads}, CTRIA3 {initial_tris} -> {final_tris}")
-    logger.info(f"  1D: CBAR {initial_bars} -> {final_bars}, CBEAM {initial_beams} -> {final_beams}")
+    logger.info(f"  1D: CBAR {initial_bars} -> {final_bars}, CBEAM {initial_beams} -> {final_beams}, CROD {initial_rods} -> {final_rods}")
     
     # Sanity checks
     logger.info("\n--- Sanity Checks ---")
@@ -1013,9 +1084,9 @@ def refine_mesh(
     # Check 2: Element count math
     # For quads: each split removes 1, adds 4 (net +3)
     # For tris: each split removes 1, adds 4 (net +3)
-    # For bars/beams: each split removes 1, adds 2 (net +1)
+    # For bars/beams/rods: each split removes 1, adds 2 (net +1)
     # Since we don't track split counts by type, skip this check if we have 1D elements
-    if initial_bars == 0 and initial_beams == 0:
+    if initial_bars == 0 and initial_beams == 0 and initial_rods == 0:
         expected_element_change = total_stats['total_elements_split'] * 3
         actual_element_change = final_elements - initial_elements
         if expected_element_change == actual_element_change:
@@ -1038,7 +1109,7 @@ def refine_mesh(
                 max_edge = compute_max_edge_length_tri(model, list(elem.nodes))
                 if max_edge > target_edge_length:
                     violations += 1
-        elif isinstance(elem, (CBAR, CBEAM)):
+        elif isinstance(elem, (CBAR, CBEAM, CROD)):
             if should_refine_element(eid, elem.pid, pid_filter, eid_range):
                 bar_length = compute_bar_length(model, list(elem.nodes[:2]))
                 if bar_length > target_edge_length:

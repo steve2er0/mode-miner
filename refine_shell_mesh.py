@@ -59,6 +59,180 @@ EdgeKey = Tuple[NodeId, NodeId]  # Sorted tuple of node IDs
 Coord3D = np.ndarray  # Shape (3,)
 
 
+def transform_offset_to_global(model: BDF, node_id: NodeId, offset: List[float]) -> np.ndarray:
+    """
+    Transform an offset vector from a node's displacement coordinate system (CD) to global.
+    
+    For OFFT='GGG', offsets are defined in the displacement coordinate system of the
+    grid point. For cylindrical systems, this means R/Theta/Z directions at that point.
+    
+    Args:
+        model: pyNastran BDF model (must be cross-referenced)
+        node_id: Node ID whose CD defines the offset coordinate system
+        offset: Offset vector [w1, w2, w3] in the node's CD
+        
+    Returns:
+        Offset vector in global XYZ coordinates
+    """
+    if offset is None or all(v == 0 for v in offset):
+        return np.array([0.0, 0.0, 0.0])
+    
+    offset_vec = np.array(offset, dtype=float)
+    
+    # Get the node's CD (displacement/analysis coordinate system)
+    node = model.nodes[node_id]
+    cd = getattr(node, 'cd', 0)
+    if cd is None:
+        cd = 0
+    
+    if cd == 0:
+        # Global rectangular - offset is already in global XYZ
+        return offset_vec
+    
+    # Get the coordinate system
+    if cd not in model.coords:
+        # Unknown coord system, assume global
+        return offset_vec
+    
+    coord = model.coords[cd]
+    coord_type = coord.type  # 'CORD2R', 'CORD2C', 'CORD2S', etc.
+    
+    # Get the node's position in global coordinates
+    node_pos_global = get_grid_xyz(model, node_id)
+    
+    if coord_type in ('CORD2R', 'CORD1R'):
+        # Rectangular coordinate system - use the coord's rotation matrix
+        # The offset components are in the local X, Y, Z directions
+        try:
+            # Get the transformation matrix from local to global
+            beta = coord.beta()  # 3x3 rotation matrix: global = beta @ local
+            return beta @ offset_vec
+        except Exception:
+            return offset_vec
+    
+    elif coord_type in ('CORD2C', 'CORD1C'):
+        # Cylindrical coordinate system
+        # Offset components are [R_offset, Theta_offset, Z_offset]
+        # Need to determine the R and Theta directions at the node's position
+        try:
+            # Get node position in the cylindrical system
+            node_pos_local = coord.transform_node_to_local(node_pos_global)
+            theta_rad = np.radians(node_pos_local[1])  # theta is in degrees
+            
+            # Compute the coordinate system's axes in global coordinates
+            # by extracting them directly from the CORD2C definition
+            # This is more reliable than pyNastran's beta() for some coordinate systems
+            
+            # Get the coordinate system's defining points in global
+            origin_global = coord.origin
+            z_axis_global = coord.k  # Unit vector along cylindrical Z axis
+            x_axis_global = coord.i  # Unit vector for theta=0 direction (R at theta=0)
+            y_axis_global = coord.j  # Unit vector perpendicular to X and Z
+            
+            # At angle theta, the R and Theta directions are:
+            # e_r = cos(theta) * x_axis + sin(theta) * y_axis
+            # e_theta = -sin(theta) * x_axis + cos(theta) * y_axis
+            # e_z = z_axis
+            
+            e_r_global = np.cos(theta_rad) * x_axis_global + np.sin(theta_rad) * y_axis_global
+            e_theta_global = -np.sin(theta_rad) * x_axis_global + np.cos(theta_rad) * y_axis_global
+            e_z_global = z_axis_global
+            
+            # The offset in global = w1*e_r + w2*e_theta + w3*e_z
+            global_offset = (offset_vec[0] * e_r_global + 
+                           offset_vec[1] * e_theta_global + 
+                           offset_vec[2] * e_z_global)
+            return global_offset
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Failed to transform cylindrical offset: {e}")
+            return offset_vec
+    
+    elif coord_type in ('CORD2S', 'CORD1S'):
+        # Spherical coordinate system - similar approach
+        # For now, just return the offset unchanged (rare case)
+        return offset_vec
+    
+    else:
+        # Unknown coordinate type, return unchanged
+        return offset_vec
+
+
+def transform_offset_from_global(model: BDF, node_id: NodeId, global_offset: np.ndarray) -> List[float]:
+    """
+    Transform an offset vector from global XYZ to a node's displacement coordinate system (CD).
+    
+    Args:
+        model: pyNastran BDF model (must be cross-referenced)
+        node_id: Node ID whose CD defines the target coordinate system
+        global_offset: Offset vector in global XYZ coordinates
+        
+    Returns:
+        Offset vector [w1, w2, w3] in the node's CD
+    """
+    if global_offset is None or np.allclose(global_offset, 0):
+        return [0.0, 0.0, 0.0]
+    
+    # Get the node's CD (displacement/analysis coordinate system)
+    node = model.nodes[node_id]
+    cd = getattr(node, 'cd', 0)
+    if cd is None:
+        cd = 0
+    
+    if cd == 0:
+        # Global rectangular - offset is already in global XYZ
+        return list(global_offset)
+    
+    # Get the coordinate system
+    if cd not in model.coords:
+        # Unknown coord system, assume global
+        return list(global_offset)
+    
+    coord = model.coords[cd]
+    coord_type = coord.type
+    
+    # Get the node's position in global coordinates
+    node_pos_global = get_grid_xyz(model, node_id)
+    
+    if coord_type in ('CORD2R', 'CORD1R'):
+        # Rectangular coordinate system
+        try:
+            beta = coord.beta()
+            # local = beta^T @ global (inverse rotation)
+            local_offset = beta.T @ global_offset
+            return list(local_offset)
+        except Exception:
+            return list(global_offset)
+    
+    elif coord_type in ('CORD2C', 'CORD1C'):
+        # Cylindrical coordinate system
+        try:
+            node_pos_local = coord.transform_node_to_local(node_pos_global)
+            theta_rad = np.radians(node_pos_local[1])
+            
+            # Get coordinate system axes directly (more reliable than beta)
+            z_axis_global = coord.k
+            x_axis_global = coord.i
+            y_axis_global = coord.j
+            
+            # Local unit vectors at this theta
+            e_r_global = np.cos(theta_rad) * x_axis_global + np.sin(theta_rad) * y_axis_global
+            e_theta_global = -np.sin(theta_rad) * x_axis_global + np.cos(theta_rad) * y_axis_global
+            e_z_global = z_axis_global
+            
+            # Project global offset onto local directions
+            w1 = float(np.dot(global_offset, e_r_global))
+            w2 = float(np.dot(global_offset, e_theta_global))
+            w3 = float(np.dot(global_offset, e_z_global))
+            
+            return [w1, w2, w3]
+        except Exception:
+            return list(global_offset)
+    
+    else:
+        return list(global_offset)
+
+
 class RefinementStats:
     """Statistics for a single refinement pass."""
     
@@ -642,24 +816,48 @@ def split_cbar(
     wa_effective = wa if wa is not None else zero_offset
     wb_effective = wb if wb is not None else zero_offset
     
-    # OFFSET HANDLING: Use constant offset per segment from nearest original node
-    # Since FEMAP's interpolation algorithm is unknown and our linear interpolation
-    # produces values that don't match, we use each original node's offset for its segment.
-    # This ensures the beam centerline position is correct at the original endpoints,
-    # with each child segment using a constant offset along its length.
-    #
-    # Child 1 (GA to midpoint): uses WA throughout (offset from original start)
-    # Child 2 (midpoint to GB): uses WB throughout (offset from original end)
-    #
-    # This creates a step discontinuity at the midpoint, but is structurally conservative
-    # and avoids introducing coordinate transformation errors.
+    # OFFSET HANDLING: Transform offsets through global coordinates
+    # WA and WB may be in different coordinate systems (e.g., GA in rectangular, GB in cylindrical).
+    # We must transform to global, interpolate, then transform back to each node's CD.
     
-    logger.info(f"CBAR {eid}: WA={wa_effective}, WB={wb_effective} (constant offset per segment)")
+    # Get node positions in global
+    ga_pos = get_grid_xyz(model, ga)
+    gb_pos = get_grid_xyz(model, gb)
+    nm_pos = get_grid_xyz(model, nm)
     
-    # Build child data - each segment uses offset from its nearest original node
+    # Transform offsets to global
+    wa_global = transform_offset_to_global(model, ga, wa_effective)
+    wb_global = transform_offset_to_global(model, gb, wb_effective)
+    
+    logger.info(f"CBAR {eid}: WA={wa_effective} (local) -> {list(wa_global)} (global)")
+    logger.info(f"CBAR {eid}: WB={wb_effective} (local) -> {list(wb_global)} (global)")
+    
+    # Compute physical beam centerline positions in global
+    centerline_a = ga_pos + wa_global
+    centerline_b = gb_pos + wb_global
+    
+    # Interpolate to get centerline position at midpoint
+    centerline_mid = (centerline_a + centerline_b) / 2.0
+    
+    # Midpoint offset in global = centerline position - node position
+    wm_global = centerline_mid - nm_pos
+    
+    logger.info(f"CBAR {eid}: Midpoint offset (global): {list(wm_global)}")
+    
+    # Transform offsets to each child node's coordinate system
+    child1_wa = wa_effective
+    child1_wb = transform_offset_from_global(model, nm, wm_global)
+    
+    child2_wa = transform_offset_from_global(model, nm, wm_global)
+    child2_wb = wb_effective
+    
+    logger.info(f"CBAR {eid}: Child1 WA={child1_wa}, WB={child1_wb}")
+    logger.info(f"CBAR {eid}: Child2 WA={child2_wa}, WB={child2_wb}")
+    
+    # Build child data
     child_data = [
-        {'nodes': [ga, nm], 'wa': wa_effective, 'wb': wa_effective, 'pa': pa, 'pb': 0},
-        {'nodes': [nm, gb], 'wa': wb_effective, 'wb': wb_effective, 'pa': 0, 'pb': pb},
+        {'nodes': [ga, nm], 'wa': child1_wa, 'wb': child1_wb, 'pa': pa, 'pb': 0},
+        {'nodes': [nm, gb], 'wa': child2_wa, 'wb': child2_wb, 'pa': 0, 'pb': pb},
     ]
     
     # Create 2 child bars - keep parent's orientation (g0 or x)
@@ -819,24 +1017,63 @@ def split_cbeam(
     wa_effective = wa if wa is not None else zero_offset
     wb_effective = wb if wb is not None else zero_offset
     
-    # OFFSET HANDLING: Use constant offset per segment from nearest original node
-    # Since FEMAP's interpolation algorithm is unknown and our linear interpolation
-    # produces values that don't match, we use each original node's offset for its segment.
-    # This ensures the beam centerline position is correct at the original endpoints,
-    # with each child segment using a constant offset along its length.
+    # OFFSET HANDLING: Transform offsets through global coordinates
+    # WA and WB may be in different coordinate systems (e.g., GA in rectangular, GB in cylindrical).
+    # We must transform to global, interpolate, then transform back to each node's CD.
     #
-    # Child 1 (GA to midpoint): uses WA throughout (offset from original start)
-    # Child 2 (midpoint to GB): uses WB throughout (offset from original end)
-    #
-    # This creates a step discontinuity at the midpoint, but is structurally conservative
-    # and avoids introducing coordinate transformation errors.
+    # Algorithm:
+    # 1. Get node positions in global coordinates
+    # 2. Transform WA from GA's CD to global offset vector
+    # 3. Transform WB from GB's CD to global offset vector
+    # 4. Compute beam centerline positions at GA and GB (node_pos + offset)
+    # 5. Interpolate centerline position at midpoint
+    # 6. Compute midpoint offset as (centerline_mid - node_mid)
+    # 7. Transform midpoint offset to the midpoint node's CD
     
-    logger.info(f"CBEAM {eid}: WA={wa_effective}, WB={wb_effective} (constant offset per segment)")
+    # Get node positions in global
+    ga_pos = get_grid_xyz(model, ga)
+    gb_pos = get_grid_xyz(model, gb)
+    nm_pos = get_grid_xyz(model, nm)
     
-    # Build child data - each segment uses offset from its nearest original node
+    # Transform offsets to global
+    wa_global = transform_offset_to_global(model, ga, wa_effective)
+    wb_global = transform_offset_to_global(model, gb, wb_effective)
+    
+    logger.info(f"CBEAM {eid}: WA={wa_effective} (local) -> {list(wa_global)} (global)")
+    logger.info(f"CBEAM {eid}: WB={wb_effective} (local) -> {list(wb_global)} (global)")
+    
+    # Compute physical beam centerline positions in global
+    centerline_a = ga_pos + wa_global
+    centerline_b = gb_pos + wb_global
+    
+    # Interpolate to get centerline position at midpoint
+    centerline_mid = (centerline_a + centerline_b) / 2.0
+    
+    # Midpoint offset in global = centerline position - node position
+    wm_global = centerline_mid - nm_pos
+    
+    logger.info(f"CBEAM {eid}: Centerline at midpoint (global): {list(centerline_mid)}")
+    logger.info(f"CBEAM {eid}: Midpoint offset (global): {list(wm_global)}")
+    
+    # Transform offsets to each child node's coordinate system
+    # Child 1: GA to NM - needs offsets in GA's CD and NM's CD
+    # Child 2: NM to GB - needs offsets in NM's CD and GB's CD
+    
+    # For child 1: WA stays as-is (already in GA's CD), WB needs to be in NM's CD
+    child1_wa = wa_effective
+    child1_wb = transform_offset_from_global(model, nm, wm_global)
+    
+    # For child 2: WA needs to be in NM's CD, WB stays as-is (already in GB's CD)
+    child2_wa = transform_offset_from_global(model, nm, wm_global)
+    child2_wb = wb_effective
+    
+    logger.info(f"CBEAM {eid}: Child1 WA={child1_wa}, WB={child1_wb}")
+    logger.info(f"CBEAM {eid}: Child2 WA={child2_wa}, WB={child2_wb}")
+    
+    # Build child data
     child_data = [
-        {'nodes': [ga, nm], 'wa': wa_effective, 'wb': wa_effective, 'pa': pa, 'pb': 0, 'sa': sa, 'sb': 0},
-        {'nodes': [nm, gb], 'wa': wb_effective, 'wb': wb_effective, 'pa': 0, 'pb': pb, 'sa': 0, 'sb': sb},
+        {'nodes': [ga, nm], 'wa': child1_wa, 'wb': child1_wb, 'pa': pa, 'pb': 0, 'sa': sa, 'sb': 0},
+        {'nodes': [nm, gb], 'wa': child2_wa, 'wb': child2_wb, 'pa': 0, 'pb': pb, 'sa': 0, 'sb': sb},
     ]
     
     # Create 2 child beams - keep parent's orientation (g0 or x)

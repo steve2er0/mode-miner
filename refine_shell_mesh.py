@@ -796,50 +796,63 @@ def run_refinement_pass(
     
     # --- PASS 2: Process 1D elements (CBAR, CBEAM, CROD) ---
     # Now the edge cache has all midpoints from 2D refinement
+    # 
+    # IMPORTANT: 1D elements MUST be split if their edge has a midpoint from 2D
+    # refinement, regardless of PID filter. This maintains conformal mesh.
+    # PID filter only applies to length-based refinement decisions.
     for eid in current_eids:
         elem = model.elements[eid]
         
         # Handle CBAR
         if isinstance(elem, CBAR):
-            if not should_refine_element(eid, elem.pid, pid_filter, eid_range):
-                continue
-            
             ga, gb = elem.nodes[:2]
-            bar_length = compute_bar_length(model, [ga, gb])
-            all_edge_lengths.append(bar_length)
-            # Split if: length exceeds target OR edge already has midpoint from 2D refinement
             edge_has_midpoint = edge_cache.get_midpoint(ga, gb) is not None
-            if bar_length > target_edge_length or edge_has_midpoint:
+            
+            # ALWAYS split if edge has midpoint (conformal mesh requirement)
+            if edge_has_midpoint:
                 split_cbar(model, elem, edge_cache, id_alloc, stats,
                           elements_to_remove, new_elements)
+            # Otherwise, check PID filter and length
+            elif should_refine_element(eid, elem.pid, pid_filter, eid_range):
+                bar_length = compute_bar_length(model, [ga, gb])
+                all_edge_lengths.append(bar_length)
+                if bar_length > target_edge_length:
+                    split_cbar(model, elem, edge_cache, id_alloc, stats,
+                              elements_to_remove, new_elements)
         
         # Handle CBEAM
         elif isinstance(elem, CBEAM):
-            if not should_refine_element(eid, elem.pid, pid_filter, eid_range):
-                continue
-            
             ga, gb = elem.nodes[:2]
-            beam_length = compute_bar_length(model, [ga, gb])
-            all_edge_lengths.append(beam_length)
-            # Split if: length exceeds target OR edge already has midpoint from 2D refinement
             edge_has_midpoint = edge_cache.get_midpoint(ga, gb) is not None
-            if beam_length > target_edge_length or edge_has_midpoint:
+            
+            # ALWAYS split if edge has midpoint (conformal mesh requirement)
+            if edge_has_midpoint:
                 split_cbeam(model, elem, edge_cache, id_alloc, stats,
                            elements_to_remove, new_elements)
+            # Otherwise, check PID filter and length
+            elif should_refine_element(eid, elem.pid, pid_filter, eid_range):
+                beam_length = compute_bar_length(model, [ga, gb])
+                all_edge_lengths.append(beam_length)
+                if beam_length > target_edge_length:
+                    split_cbeam(model, elem, edge_cache, id_alloc, stats,
+                               elements_to_remove, new_elements)
         
         # Handle CROD
         elif isinstance(elem, CROD):
-            if not should_refine_element(eid, elem.pid, pid_filter, eid_range):
-                continue
-            
             ga, gb = elem.nodes[:2]
-            rod_length = compute_bar_length(model, [ga, gb])
-            all_edge_lengths.append(rod_length)
-            # Split if: length exceeds target OR edge already has midpoint from 2D refinement
             edge_has_midpoint = edge_cache.get_midpoint(ga, gb) is not None
-            if rod_length > target_edge_length or edge_has_midpoint:
+            
+            # ALWAYS split if edge has midpoint (conformal mesh requirement)
+            if edge_has_midpoint:
                 split_crod(model, elem, edge_cache, id_alloc, stats,
                           elements_to_remove, new_elements)
+            # Otherwise, check PID filter and length
+            elif should_refine_element(eid, elem.pid, pid_filter, eid_range):
+                rod_length = compute_bar_length(model, [ga, gb])
+                all_edge_lengths.append(rod_length)
+                if rod_length > target_edge_length:
+                    split_crod(model, elem, edge_cache, id_alloc, stats,
+                              elements_to_remove, new_elements)
     
     # Log edge length diagnostics
     if logger and all_edge_lengths:

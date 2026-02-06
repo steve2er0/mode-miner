@@ -642,93 +642,23 @@ def split_cbar(
     wa_effective = wa if wa is not None else zero_offset
     wb_effective = wb if wb is not None else zero_offset
     
-    # Get node positions in global coordinates
-    ga_pos = get_grid_xyz(model, ga)
-    gb_pos = get_grid_xyz(model, gb)
-    nm_pos = get_grid_xyz(model, nm)
+    # With OFFT='GGG' (default), offsets are already in GLOBAL coordinates
+    # So we just linearly interpolate them directly - no transformation needed
+    w_mid = [
+        (wa_effective[0] + wb_effective[0]) / 2.0,
+        (wa_effective[1] + wb_effective[1]) / 2.0,
+        (wa_effective[2] + wb_effective[2]) / 2.0,
+    ]
     
-    # Compute parent element's local coordinate system
-    # Per Nastran QRG: offsets are in Cartesian at the grid point
-    parent_axis = gb_pos - ga_pos
-    parent_len = np.linalg.norm(parent_axis)
-    parent_axis = parent_axis / parent_len
+    logger.info(f"CBAR {eid}: WA={wa_effective}, WB={wb_effective}, W_mid={w_mid}")
     
-    # Get orientation vector
-    if g0 is not None:
-        g0_pos = get_grid_xyz(model, g0)
-        orient_vec = g0_pos - ga_pos
-    elif x is not None:
-        orient_vec = np.array(x)
-    else:
-        orient_vec = np.array([0.0, 0.0, 1.0])
+    # Build child data - offsets stay in global coordinates
+    child_data = [
+        {'nodes': [ga, nm], 'wa': wa_effective, 'wb': w_mid, 'pa': pa, 'pb': 0},
+        {'nodes': [nm, gb], 'wa': w_mid, 'wb': wb_effective, 'pa': 0, 'pb': pb},
+    ]
     
-    # Compute parent's y-axis
-    parent_y = orient_vec - np.dot(orient_vec, parent_axis) * parent_axis
-    parent_y_len = np.linalg.norm(parent_y)
-    if parent_y_len > 1e-10:
-        parent_y = parent_y / parent_y_len
-    else:
-        if abs(parent_axis[2]) < 0.9:
-            parent_y = np.cross(np.array([0., 0., 1.]), parent_axis)
-        else:
-            parent_y = np.cross(np.array([1., 0., 0.]), parent_axis)
-        parent_y = parent_y / np.linalg.norm(parent_y)
-    
-    parent_z = np.cross(parent_axis, parent_y)
-    
-    # Transform offsets to global coordinates
-    wa_global = wa_effective[0] * parent_y + wa_effective[1] * parent_z + wa_effective[2] * parent_axis
-    wb_global = wb_effective[0] * parent_y + wb_effective[1] * parent_z + wb_effective[2] * parent_axis
-    
-    # Linearly interpolate the GLOBAL offset at the midpoint
-    wm_global = (wa_global + wb_global) / 2.0
-    
-    logger.info(f"CBAR {eid}: WA global={wa_global}, WB global={wb_global}, WM global={wm_global}")
-    
-    # Compute each child's local coordinate system and transform offsets back
-    child_data = []
-    for child_ga, child_gb, end_a_offset_global, end_b_offset_global, pa_c, pb_c in [
-        (ga, nm, wa_global, wm_global, pa, 0),  # Child 1
-        (nm, gb, wm_global, wb_global, 0, pb),  # Child 2
-    ]:
-        child_ga_pos = get_grid_xyz(model, child_ga)
-        child_gb_pos = get_grid_xyz(model, child_gb)
-        child_axis = child_gb_pos - child_ga_pos
-        child_axis = child_axis / np.linalg.norm(child_axis)
-        
-        child_y = orient_vec - np.dot(orient_vec, child_axis) * child_axis
-        child_y_len = np.linalg.norm(child_y)
-        if child_y_len > 1e-10:
-            child_y = child_y / child_y_len
-        else:
-            child_y = parent_y
-        
-        child_z = np.cross(child_axis, child_y)
-        child_x = list(orient_vec)
-        
-        child_wa = [
-            float(np.dot(end_a_offset_global, child_y)),
-            float(np.dot(end_a_offset_global, child_z)),
-            float(np.dot(end_a_offset_global, child_axis)),
-        ]
-        child_wb = [
-            float(np.dot(end_b_offset_global, child_y)),
-            float(np.dot(end_b_offset_global, child_z)),
-            float(np.dot(end_b_offset_global, child_axis)),
-        ]
-        
-        child_data.append({
-            'nodes': [child_ga, child_gb],
-            'x': child_x,
-            'wa': child_wa,
-            'wb': child_wb,
-            'pa': pa_c,
-            'pb': pb_c,
-        })
-        
-        logger.info(f"CBAR {eid}: Child [{child_ga}->{child_gb}] wa={child_wa}, wb={child_wb}")
-    
-    # Create 2 child bars with properly transformed offsets
+    # Create 2 child bars - keep parent's orientation (g0 or x)
     for cd in child_data:
         new_eid = id_alloc.allocate_element_id()
         new_elements.append({
@@ -736,15 +666,15 @@ def split_cbar(
             'eid': new_eid,
             'pid': pid,
             'nodes': cd['nodes'],
-            'g0': None,
-            'x': cd['x'],
+            'g0': g0,  # Keep parent's G0
+            'x': x,    # Keep parent's X vector
             'offt': offt,
             'pa': cd['pa'],
             'pb': cd['pb'],
             'wa': cd['wa'],
             'wb': cd['wb'],
         })
-        logger.info(f"  -> Child CBAR {new_eid}: nodes={cd['nodes']}, x={cd['x']}, wa={cd['wa']}, wb={cd['wb']}")
+        logger.info(f"  -> Child CBAR {new_eid}: nodes={cd['nodes']}, x={x}, wa={cd['wa']}, wb={cd['wb']}")
         stats.elements_added += 1
 
 
@@ -885,108 +815,23 @@ def split_cbeam(
     wa_effective = wa if wa is not None else zero_offset
     wb_effective = wb if wb is not None else zero_offset
     
-    # Get node positions in global coordinates
-    ga_pos = get_grid_xyz(model, ga)
-    gb_pos = get_grid_xyz(model, gb)
-    nm_pos = get_grid_xyz(model, nm)
+    # With OFFT='GGG' (default), offsets are already in GLOBAL coordinates
+    # So we just linearly interpolate them directly - no transformation needed
+    w_mid = [
+        (wa_effective[0] + wb_effective[0]) / 2.0,
+        (wa_effective[1] + wb_effective[1]) / 2.0,
+        (wa_effective[2] + wb_effective[2]) / 2.0,
+    ]
     
-    # Compute parent element's local coordinate system
-    # Per Nastran QRG: offsets are in Cartesian at the grid point
-    # With OFFT='GGG', the displacement CSYS of grid point A defines orientation
-    parent_axis = gb_pos - ga_pos
-    parent_len = np.linalg.norm(parent_axis)
-    parent_axis = parent_axis / parent_len
+    logger.info(f"CBEAM {eid}: WA={wa_effective}, WB={wb_effective}, W_mid={w_mid}")
     
-    # Get orientation vector (X vector points toward element y-axis plane)
-    if g0 is not None:
-        g0_pos = get_grid_xyz(model, g0)
-        orient_vec = g0_pos - ga_pos
-    elif x is not None:
-        orient_vec = np.array(x)
-    else:
-        orient_vec = np.array([0.0, 0.0, 1.0])
+    # Build child data - offsets stay in global coordinates
+    child_data = [
+        {'nodes': [ga, nm], 'wa': wa_effective, 'wb': w_mid, 'pa': pa, 'pb': 0, 'sa': sa, 'sb': 0},
+        {'nodes': [nm, gb], 'wa': w_mid, 'wb': wb_effective, 'pa': 0, 'pb': pb, 'sa': 0, 'sb': sb},
+    ]
     
-    # Compute parent's y-axis (perpendicular to beam, in plane with orient_vec)
-    parent_y = orient_vec - np.dot(orient_vec, parent_axis) * parent_axis
-    parent_y_len = np.linalg.norm(parent_y)
-    if parent_y_len > 1e-10:
-        parent_y = parent_y / parent_y_len
-    else:
-        # Orient vec parallel to beam - use default
-        if abs(parent_axis[2]) < 0.9:
-            parent_y = np.cross(np.array([0., 0., 1.]), parent_axis)
-        else:
-            parent_y = np.cross(np.array([1., 0., 0.]), parent_axis)
-        parent_y = parent_y / np.linalg.norm(parent_y)
-    
-    # z-axis completes right-hand system
-    parent_z = np.cross(parent_axis, parent_y)
-    
-    # Transform offsets to global coordinates
-    # CBEAM offset W = [W1, W2, W3] where W1=y-offset, W2=z-offset, W3=x-offset (axial)
-    wa_global = wa_effective[0] * parent_y + wa_effective[1] * parent_z + wa_effective[2] * parent_axis
-    wb_global = wb_effective[0] * parent_y + wb_effective[1] * parent_z + wb_effective[2] * parent_axis
-    
-    # Linearly interpolate the GLOBAL offset at the midpoint
-    wm_global = (wa_global + wb_global) / 2.0
-    
-    logger.info(f"CBEAM {eid}: WA global={wa_global}, WB global={wb_global}, WM global={wm_global}")
-    
-    # Now compute each child's local coordinate system and transform offsets back
-    child_data = []
-    for child_ga, child_gb, end_a_offset_global, end_b_offset_global, pa_c, pb_c, sa_c, sb_c in [
-        (ga, nm, wa_global, wm_global, pa, 0, sa, 0),  # Child 1: GA to midpoint
-        (nm, gb, wm_global, wb_global, 0, pb, 0, sb),   # Child 2: midpoint to GB
-    ]:
-        # Child beam axis
-        child_ga_pos = get_grid_xyz(model, child_ga)
-        child_gb_pos = get_grid_xyz(model, child_gb)
-        child_axis = child_gb_pos - child_ga_pos
-        child_axis = child_axis / np.linalg.norm(child_axis)
-        
-        # Child y-axis: use SAME orientation vector as parent (maintain global y direction)
-        child_y = orient_vec - np.dot(orient_vec, child_axis) * child_axis
-        child_y_len = np.linalg.norm(child_y)
-        if child_y_len > 1e-10:
-            child_y = child_y / child_y_len
-        else:
-            child_y = parent_y  # Fallback
-        
-        child_z = np.cross(child_axis, child_y)
-        
-        # Compute X vector for this child (direction that gives us the y-axis we want)
-        # X vector should be such that projecting it perpendicular to beam axis gives child_y
-        # The simplest is to use orient_vec directly, or compute from child_y
-        child_x = list(orient_vec)  # Same orientation vector for all children
-        
-        # Transform global offsets to child's local coordinates
-        # Local = [dot(global, y), dot(global, z), dot(global, x)]
-        child_wa = [
-            float(np.dot(end_a_offset_global, child_y)),
-            float(np.dot(end_a_offset_global, child_z)),
-            float(np.dot(end_a_offset_global, child_axis)),
-        ]
-        child_wb = [
-            float(np.dot(end_b_offset_global, child_y)),
-            float(np.dot(end_b_offset_global, child_z)),
-            float(np.dot(end_b_offset_global, child_axis)),
-        ]
-        
-        child_data.append({
-            'nodes': [child_ga, child_gb],
-            'x': child_x,
-            'wa': child_wa,
-            'wb': child_wb,
-            'pa': pa_c,
-            'pb': pb_c,
-            'sa': sa_c,
-            'sb': sb_c,
-        })
-        
-        logger.info(f"CBEAM {eid}: Child [{child_ga}->{child_gb}] axis={child_axis}, y={child_y}")
-        logger.info(f"  -> WA (local): {child_wa}, WB (local): {child_wb}")
-    
-    # Create 2 child beams with properly transformed offsets
+    # Create 2 child beams - keep parent's orientation (g0 or x)
     for cd in child_data:
         new_eid = id_alloc.allocate_element_id()
         new_elements.append({
@@ -994,8 +839,8 @@ def split_cbeam(
             'eid': new_eid,
             'pid': pid,
             'nodes': cd['nodes'],
-            'g0': None,  # Use X vector, not G0 (since we computed child-specific X)
-            'x': cd['x'],
+            'g0': g0,  # Keep parent's G0
+            'x': x,    # Keep parent's X vector
             'offt': offt,
             'bit': bit,
             'pa': cd['pa'],
@@ -1005,7 +850,7 @@ def split_cbeam(
             'sa': cd['sa'],
             'sb': cd['sb'],
         })
-        logger.info(f"  -> Child CBEAM {new_eid}: nodes={cd['nodes']}, x={cd['x']}, wa={cd['wa']}, wb={cd['wb']}")
+        logger.info(f"  -> Child CBEAM {new_eid}: nodes={cd['nodes']}, x={x}, wa={cd['wa']}, wb={cd['wb']}")
         stats.elements_added += 1
 
 

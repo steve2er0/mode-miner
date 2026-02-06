@@ -43,6 +43,8 @@ import numpy as np
 try:
     from pyNastran.bdf.bdf import BDF
     from pyNastran.bdf.cards.elements.shell import CQUAD4, CTRIA3
+    from pyNastran.bdf.cards.elements.bars import CBAR
+    from pyNastran.bdf.cards.elements.beam import CBEAM
     from pyNastran.bdf.cards.nodes import GRID
 except ImportError:
     print("ERROR: pyNastran is required. Install with: pip install pyNastran")
@@ -484,6 +486,167 @@ def split_ctria3(
         stats.elements_added += 1
 
 
+def compute_bar_length(model: BDF, nodes: List[NodeId]) -> float:
+    """
+    Compute the length of a bar/beam element.
+    
+    Args:
+        model: pyNastran BDF model
+        nodes: List of 2 node IDs [GA, GB]
+        
+    Returns:
+        Element length
+    """
+    return compute_edge_length(model, nodes[0], nodes[1])
+
+
+def split_cbar(
+    model: BDF,
+    elem: CBAR,
+    edge_cache: EdgeCache,
+    id_alloc: IdAllocator,
+    stats: RefinementStats,
+    elements_to_remove: Set[ElementId],
+    new_elements: List[dict]
+) -> None:
+    """
+    Split a CBAR into 2 child CBAR elements.
+    
+    Split pattern:
+        GA -------- GB    becomes    GA ---- NM ---- GB
+        
+    Child bars:
+        B1: [GA, NM]  (first half)
+        B2: [NM, GB]  (second half)
+    
+    Args:
+        model: pyNastran BDF model
+        elem: CBAR element to split
+        edge_cache: Edge midpoint cache
+        id_alloc: ID allocator
+        stats: Statistics tracker
+        elements_to_remove: Set to add original element ID to
+        new_elements: List to append new element definitions to
+    """
+    eid = elem.eid
+    pid = elem.pid
+    ga, gb = elem.nodes[:2]  # CBAR nodes are [GA, GB]
+    
+    # Get orientation - could be G0 (node ID) or X vector
+    g0 = elem.g0
+    x = elem.x
+    
+    # Get optional fields
+    offt = getattr(elem, 'offt', 'GGG')
+    pa = getattr(elem, 'pa', 0)
+    pb = getattr(elem, 'pb', 0)
+    wa = getattr(elem, 'wa', None)
+    wb = getattr(elem, 'wb', None)
+    
+    # Get or create midpoint node (shared via edge cache)
+    nm = get_or_create_midpoint_node(model, ga, gb, edge_cache, id_alloc, stats)
+    
+    # Mark original element for removal
+    elements_to_remove.add(eid)
+    stats.elements_split += 1
+    
+    # Create 2 child bars
+    for child_nodes, pa_child, pb_child in [([ga, nm], pa, 0), ([nm, gb], 0, pb)]:
+        new_eid = id_alloc.allocate_element_id()
+        new_elements.append({
+            'type': 'CBAR',
+            'eid': new_eid,
+            'pid': pid,
+            'nodes': child_nodes,
+            'g0': g0,
+            'x': x,
+            'offt': offt,
+            'pa': pa_child,
+            'pb': pb_child,
+            'wa': wa,
+            'wb': wb,
+        })
+        stats.elements_added += 1
+
+
+def split_cbeam(
+    model: BDF,
+    elem: CBEAM,
+    edge_cache: EdgeCache,
+    id_alloc: IdAllocator,
+    stats: RefinementStats,
+    elements_to_remove: Set[ElementId],
+    new_elements: List[dict]
+) -> None:
+    """
+    Split a CBEAM into 2 child CBEAM elements.
+    
+    Split pattern:
+        GA -------- GB    becomes    GA ---- NM ---- GB
+        
+    Child beams:
+        B1: [GA, NM]  (first half)
+        B2: [NM, GB]  (second half)
+    
+    Args:
+        model: pyNastran BDF model
+        elem: CBEAM element to split
+        edge_cache: Edge midpoint cache
+        id_alloc: ID allocator
+        stats: Statistics tracker
+        elements_to_remove: Set to add original element ID to
+        new_elements: List to append new element definitions to
+    """
+    eid = elem.eid
+    pid = elem.pid
+    ga, gb = elem.nodes[:2]  # CBEAM nodes are [GA, GB]
+    
+    # Get orientation - could be G0 (node ID) or X vector
+    g0 = elem.g0
+    x = elem.x
+    
+    # Get optional fields
+    offt = getattr(elem, 'offt', 'GGG')
+    bit = getattr(elem, 'bit', None)
+    pa = getattr(elem, 'pa', 0)
+    pb = getattr(elem, 'pb', 0)
+    wa = getattr(elem, 'wa', None)
+    wb = getattr(elem, 'wb', None)
+    sa = getattr(elem, 'sa', 0)
+    sb = getattr(elem, 'sb', 0)
+    
+    # Get or create midpoint node (shared via edge cache)
+    nm = get_or_create_midpoint_node(model, ga, gb, edge_cache, id_alloc, stats)
+    
+    # Mark original element for removal
+    elements_to_remove.add(eid)
+    stats.elements_split += 1
+    
+    # Create 2 child beams
+    for child_nodes, pa_child, pb_child, sa_child, sb_child in [
+        ([ga, nm], pa, 0, sa, 0), 
+        ([nm, gb], 0, pb, 0, sb)
+    ]:
+        new_eid = id_alloc.allocate_element_id()
+        new_elements.append({
+            'type': 'CBEAM',
+            'eid': new_eid,
+            'pid': pid,
+            'nodes': child_nodes,
+            'g0': g0,
+            'x': x,
+            'offt': offt,
+            'bit': bit,
+            'pa': pa_child,
+            'pb': pb_child,
+            'wa': wa,
+            'wb': wb,
+            'sa': sa_child,
+            'sb': sb_child,
+        })
+        stats.elements_added += 1
+
+
 def should_refine_element(
     elem_id: ElementId,
     elem_pid: int,
@@ -572,6 +735,28 @@ def run_refinement_pass(
             if max_edge > target_edge_length:
                 split_ctria3(model, elem, edge_cache, id_alloc, stats,
                            elements_to_remove, new_elements)
+        
+        # Handle CBAR
+        elif isinstance(elem, CBAR):
+            if not should_refine_element(eid, elem.pid, pid_filter, eid_range):
+                continue
+            
+            bar_length = compute_bar_length(model, list(elem.nodes[:2]))
+            all_edge_lengths.append(bar_length)
+            if bar_length > target_edge_length:
+                split_cbar(model, elem, edge_cache, id_alloc, stats,
+                          elements_to_remove, new_elements)
+        
+        # Handle CBEAM
+        elif isinstance(elem, CBEAM):
+            if not should_refine_element(eid, elem.pid, pid_filter, eid_range):
+                continue
+            
+            beam_length = compute_bar_length(model, list(elem.nodes[:2]))
+            all_edge_lengths.append(beam_length)
+            if beam_length > target_edge_length:
+                split_cbeam(model, elem, edge_cache, id_alloc, stats,
+                           elements_to_remove, new_elements)
     
     # Log edge length diagnostics
     if logger and all_edge_lengths:
@@ -612,6 +797,35 @@ def run_refinement_pass(
                 T1=elem_def['T1'],
                 T2=elem_def['T2'],
                 T3=elem_def['T3'],
+            )
+        elif elem_def['type'] == 'CBAR':
+            model.add_cbar(
+                eid=elem_def['eid'],
+                pid=elem_def['pid'],
+                nids=elem_def['nodes'],
+                g0=elem_def['g0'],
+                x=elem_def['x'],
+                offt=elem_def['offt'],
+                pa=elem_def['pa'],
+                pb=elem_def['pb'],
+                wa=elem_def['wa'],
+                wb=elem_def['wb'],
+            )
+        elif elem_def['type'] == 'CBEAM':
+            model.add_cbeam(
+                eid=elem_def['eid'],
+                pid=elem_def['pid'],
+                nids=elem_def['nodes'],
+                g0=elem_def['g0'],
+                x=elem_def['x'],
+                offt=elem_def['offt'],
+                bit=elem_def['bit'],
+                pa=elem_def['pa'],
+                pb=elem_def['pb'],
+                wa=elem_def['wa'],
+                wb=elem_def['wb'],
+                sa=elem_def['sa'],
+                sb=elem_def['sb'],
             )
     
     # Re-cross-reference the model so new nodes work with get_position()
@@ -678,9 +892,12 @@ def refine_mesh(
     # Count element types
     initial_quads = sum(1 for e in model.elements.values() if isinstance(e, CQUAD4))
     initial_tris = sum(1 for e in model.elements.values() if isinstance(e, CTRIA3))
+    initial_bars = sum(1 for e in model.elements.values() if isinstance(e, CBAR))
+    initial_beams = sum(1 for e in model.elements.values() if isinstance(e, CBEAM))
     
-    logger.info(f"Initial mesh: {initial_nodes} nodes, {initial_elements} elements "
-                f"({initial_quads} CQUAD4, {initial_tris} CTRIA3)")
+    logger.info(f"Initial mesh: {initial_nodes} nodes, {initial_elements} elements")
+    logger.info(f"  2D: {initial_quads} CQUAD4, {initial_tris} CTRIA3")
+    logger.info(f"  1D: {initial_bars} CBAR, {initial_beams} CBEAM")
     logger.info(f"Target edge length: {target_edge_length}")
     logger.info(f"Max passes: {max_passes}")
     
@@ -773,6 +990,8 @@ def refine_mesh(
     final_elements = len(model.elements)
     final_quads = sum(1 for e in model.elements.values() if isinstance(e, CQUAD4))
     final_tris = sum(1 for e in model.elements.values() if isinstance(e, CTRIA3))
+    final_bars = sum(1 for e in model.elements.values() if isinstance(e, CBAR))
+    final_beams = sum(1 for e in model.elements.values() if isinstance(e, CBEAM))
     
     # Summary
     logger.info("\n" + "="*50)
@@ -781,8 +1000,8 @@ def refine_mesh(
     logger.info(f"Passes completed: {total_stats['passes']}")
     logger.info(f"Nodes: {initial_nodes} -> {final_nodes} (+{final_nodes - initial_nodes})")
     logger.info(f"Elements: {initial_elements} -> {final_elements}")
-    logger.info(f"  CQUAD4: {initial_quads} -> {final_quads}")
-    logger.info(f"  CTRIA3: {initial_tris} -> {final_tris}")
+    logger.info(f"  2D: CQUAD4 {initial_quads} -> {final_quads}, CTRIA3 {initial_tris} -> {final_tris}")
+    logger.info(f"  1D: CBAR {initial_bars} -> {final_bars}, CBEAM {initial_beams} -> {final_beams}")
     
     # Sanity checks
     logger.info("\n--- Sanity Checks ---")
@@ -794,12 +1013,17 @@ def refine_mesh(
     # Check 2: Element count math
     # For quads: each split removes 1, adds 4 (net +3)
     # For tris: each split removes 1, adds 4 (net +3)
-    expected_element_change = total_stats['total_elements_split'] * 3
-    actual_element_change = final_elements - initial_elements
-    if expected_element_change == actual_element_change:
-        logger.info(f"✓ Element count change matches expected ({actual_element_change})")
+    # For bars/beams: each split removes 1, adds 2 (net +1)
+    # Since we don't track split counts by type, skip this check if we have 1D elements
+    if initial_bars == 0 and initial_beams == 0:
+        expected_element_change = total_stats['total_elements_split'] * 3
+        actual_element_change = final_elements - initial_elements
+        if expected_element_change == actual_element_change:
+            logger.info(f"✓ Element count change matches expected ({actual_element_change})")
+        else:
+            logger.warning(f"✗ Element count mismatch: expected +{expected_element_change}, got +{actual_element_change}")
     else:
-        logger.warning(f"✗ Element count mismatch: expected +{expected_element_change}, got +{actual_element_change}")
+        logger.info(f"  Element count change: +{final_elements - initial_elements} (mixed 1D/2D)")
     
     # Check 3: Verify no remaining violations (sample check)
     violations = 0
@@ -813,6 +1037,11 @@ def refine_mesh(
             if should_refine_element(eid, elem.pid, pid_filter, eid_range):
                 max_edge = compute_max_edge_length_tri(model, list(elem.nodes))
                 if max_edge > target_edge_length:
+                    violations += 1
+        elif isinstance(elem, (CBAR, CBEAM)):
+            if should_refine_element(eid, elem.pid, pid_filter, eid_range):
+                bar_length = compute_bar_length(model, list(elem.nodes[:2]))
+                if bar_length > target_edge_length:
                     violations += 1
     
     if violations == 0:

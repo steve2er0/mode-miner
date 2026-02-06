@@ -642,66 +642,109 @@ def split_cbar(
     wa_effective = wa if wa is not None else zero_offset
     wb_effective = wb if wb is not None else zero_offset
     
-    # Check if nodes have different analysis coordinate systems (CD fields)
-    # This affects how offset vectors are interpreted
-    ga_grid = model.nodes[ga]
-    gb_grid = model.nodes[gb]
-    nm_grid = model.nodes[nm]
+    # Get node positions in global coordinates
+    ga_pos = get_grid_xyz(model, ga)
+    gb_pos = get_grid_xyz(model, gb)
+    nm_pos = get_grid_xyz(model, nm)
     
-    cd_ga = getattr(ga_grid, 'cd', 0) if hasattr(ga_grid, 'cd') else 0
-    cd_gb = getattr(gb_grid, 'cd', 0) if hasattr(gb_grid, 'cd') else 0
-    cd_nm = getattr(nm_grid, 'cd', 0) if hasattr(nm_grid, 'cd') else 0
+    # Compute parent element's local coordinate system
+    # Per Nastran QRG: offsets are in Cartesian at the grid point
+    parent_axis = gb_pos - ga_pos
+    parent_len = np.linalg.norm(parent_axis)
+    parent_axis = parent_axis / parent_len
     
-    # If nodes have different CD (analysis coordinate systems), we can't simply
-    # interpolate offset vectors - they're in different coordinate systems!
-    # In this case, use a conservative approach: copy offsets from nearest original node
-    if cd_ga != cd_gb:
-        logger.warning(f"CBAR {eid}: Nodes have different CD fields (GA CD={cd_ga}, GB CD={cd_gb}). "
-                      f"Using nearest-node offset instead of interpolation.")
-        # Child 1 (GA to midpoint): use WA for both ends (offset is in GA's coord system)
-        # Child 2 (midpoint to GB): use WB for both ends (offset is in GB's coord system)
-        child1_wa = wa_effective
-        child1_wb = wa_effective  # Use WA at midpoint for child 1
-        child2_wa = wb_effective  # Use WB at midpoint for child 2  
-        child2_wb = wb_effective
-        logger.info(f"CBAR {eid}: Child 1: WA={child1_wa}, WB={child1_wb}")
-        logger.info(f"CBAR {eid}: Child 2: WA={child2_wa}, WB={child2_wb}")
+    # Get orientation vector
+    if g0 is not None:
+        g0_pos = get_grid_xyz(model, g0)
+        orient_vec = g0_pos - ga_pos
+    elif x is not None:
+        orient_vec = np.array(x)
     else:
-        # Same coordinate system - can safely interpolate
-        # Simple linear interpolation of offset vectors at t=0.5
-        w_mid = [
-            (wa_effective[0] + wb_effective[0]) / 2.0,
-            (wa_effective[1] + wb_effective[1]) / 2.0,
-            (wa_effective[2] + wb_effective[2]) / 2.0,
-        ]
-        child1_wa = wa_effective
-        child1_wb = w_mid
-        child2_wa = w_mid
-        child2_wb = wb_effective
-        logger.info(f"CBAR {eid}: Linear interpolation - midpoint offset: {w_mid}")
+        orient_vec = np.array([0.0, 0.0, 1.0])
     
-    # Create 2 child bars
-    # Child 1 [GA, midpoint]: WA = parent's WA, WB = midpoint/nearest offset
-    # Child 2 [midpoint, GB]: WA = midpoint/nearest offset, WB = parent's WB
-    for child_nodes, pa_child, pb_child, c_wa, c_wb in [
-        ([ga, nm], pa, 0, child1_wa, child1_wb), 
-        ([nm, gb], 0, pb, child2_wa, child2_wb)
+    # Compute parent's y-axis
+    parent_y = orient_vec - np.dot(orient_vec, parent_axis) * parent_axis
+    parent_y_len = np.linalg.norm(parent_y)
+    if parent_y_len > 1e-10:
+        parent_y = parent_y / parent_y_len
+    else:
+        if abs(parent_axis[2]) < 0.9:
+            parent_y = np.cross(np.array([0., 0., 1.]), parent_axis)
+        else:
+            parent_y = np.cross(np.array([1., 0., 0.]), parent_axis)
+        parent_y = parent_y / np.linalg.norm(parent_y)
+    
+    parent_z = np.cross(parent_axis, parent_y)
+    
+    # Transform offsets to global coordinates
+    wa_global = wa_effective[0] * parent_y + wa_effective[1] * parent_z + wa_effective[2] * parent_axis
+    wb_global = wb_effective[0] * parent_y + wb_effective[1] * parent_z + wb_effective[2] * parent_axis
+    
+    # Linearly interpolate the GLOBAL offset at the midpoint
+    wm_global = (wa_global + wb_global) / 2.0
+    
+    logger.info(f"CBAR {eid}: WA global={wa_global}, WB global={wb_global}, WM global={wm_global}")
+    
+    # Compute each child's local coordinate system and transform offsets back
+    child_data = []
+    for child_ga, child_gb, end_a_offset_global, end_b_offset_global, pa_c, pb_c in [
+        (ga, nm, wa_global, wm_global, pa, 0),  # Child 1
+        (nm, gb, wm_global, wb_global, 0, pb),  # Child 2
     ]:
+        child_ga_pos = get_grid_xyz(model, child_ga)
+        child_gb_pos = get_grid_xyz(model, child_gb)
+        child_axis = child_gb_pos - child_ga_pos
+        child_axis = child_axis / np.linalg.norm(child_axis)
+        
+        child_y = orient_vec - np.dot(orient_vec, child_axis) * child_axis
+        child_y_len = np.linalg.norm(child_y)
+        if child_y_len > 1e-10:
+            child_y = child_y / child_y_len
+        else:
+            child_y = parent_y
+        
+        child_z = np.cross(child_axis, child_y)
+        child_x = list(orient_vec)
+        
+        child_wa = [
+            float(np.dot(end_a_offset_global, child_y)),
+            float(np.dot(end_a_offset_global, child_z)),
+            float(np.dot(end_a_offset_global, child_axis)),
+        ]
+        child_wb = [
+            float(np.dot(end_b_offset_global, child_y)),
+            float(np.dot(end_b_offset_global, child_z)),
+            float(np.dot(end_b_offset_global, child_axis)),
+        ]
+        
+        child_data.append({
+            'nodes': [child_ga, child_gb],
+            'x': child_x,
+            'wa': child_wa,
+            'wb': child_wb,
+            'pa': pa_c,
+            'pb': pb_c,
+        })
+        
+        logger.info(f"CBAR {eid}: Child [{child_ga}->{child_gb}] wa={child_wa}, wb={child_wb}")
+    
+    # Create 2 child bars with properly transformed offsets
+    for cd in child_data:
         new_eid = id_alloc.allocate_element_id()
         new_elements.append({
             'type': 'CBAR',
             'eid': new_eid,
             'pid': pid,
-            'nodes': child_nodes,
-            'g0': g0,
-            'x': x,
+            'nodes': cd['nodes'],
+            'g0': None,
+            'x': cd['x'],
             'offt': offt,
-            'pa': pa_child,
-            'pb': pb_child,
-            'wa': c_wa,
-            'wb': c_wb,
+            'pa': cd['pa'],
+            'pb': cd['pb'],
+            'wa': cd['wa'],
+            'wb': cd['wb'],
         })
-        logger.info(f"  -> Child CBAR {new_eid}: nodes={child_nodes}, x={x}, wa={c_wa}, wb={c_wb}")
+        logger.info(f"  -> Child CBAR {new_eid}: nodes={cd['nodes']}, x={cd['x']}, wa={cd['wa']}, wb={cd['wb']}")
         stats.elements_added += 1
 
 
@@ -842,69 +885,127 @@ def split_cbeam(
     wa_effective = wa if wa is not None else zero_offset
     wb_effective = wb if wb is not None else zero_offset
     
-    # Check if nodes have different analysis coordinate systems (CD fields)
-    # This affects how offset vectors are interpreted
-    ga_grid = model.nodes[ga]
-    gb_grid = model.nodes[gb]
-    nm_grid = model.nodes[nm]
+    # Get node positions in global coordinates
+    ga_pos = get_grid_xyz(model, ga)
+    gb_pos = get_grid_xyz(model, gb)
+    nm_pos = get_grid_xyz(model, nm)
     
-    cd_ga = getattr(ga_grid, 'cd', 0) if hasattr(ga_grid, 'cd') else 0
-    cd_gb = getattr(gb_grid, 'cd', 0) if hasattr(gb_grid, 'cd') else 0
-    cd_nm = getattr(nm_grid, 'cd', 0) if hasattr(nm_grid, 'cd') else 0
+    # Compute parent element's local coordinate system
+    # Per Nastran QRG: offsets are in Cartesian at the grid point
+    # With OFFT='GGG', the displacement CSYS of grid point A defines orientation
+    parent_axis = gb_pos - ga_pos
+    parent_len = np.linalg.norm(parent_axis)
+    parent_axis = parent_axis / parent_len
     
-    # If nodes have different CD (analysis coordinate systems), we can't simply
-    # interpolate offset vectors - they're in different coordinate systems!
-    # In this case, use a conservative approach: copy offsets from nearest original node
-    if cd_ga != cd_gb:
-        logger.warning(f"CBEAM {eid}: Nodes have different CD fields (GA CD={cd_ga}, GB CD={cd_gb}). "
-                      f"Using nearest-node offset instead of interpolation.")
-        # Child 1 (GA to midpoint): use WA for both ends (offset is in GA's coord system)
-        # Child 2 (midpoint to GB): use WB for both ends (offset is in GB's coord system)
-        child1_wa = wa_effective
-        child1_wb = wa_effective  # Use WA at midpoint for child 1
-        child2_wa = wb_effective  # Use WB at midpoint for child 2  
-        child2_wb = wb_effective
-        logger.info(f"CBEAM {eid}: Child 1: WA={child1_wa}, WB={child1_wb}")
-        logger.info(f"CBEAM {eid}: Child 2: WA={child2_wa}, WB={child2_wb}")
+    # Get orientation vector (X vector points toward element y-axis plane)
+    if g0 is not None:
+        g0_pos = get_grid_xyz(model, g0)
+        orient_vec = g0_pos - ga_pos
+    elif x is not None:
+        orient_vec = np.array(x)
     else:
-        # Same coordinate system - can safely interpolate
-        # Simple linear interpolation of offset vectors at t=0.5
-        w_mid = [
-            (wa_effective[0] + wb_effective[0]) / 2.0,
-            (wa_effective[1] + wb_effective[1]) / 2.0,
-            (wa_effective[2] + wb_effective[2]) / 2.0,
-        ]
-        child1_wa = wa_effective
-        child1_wb = w_mid
-        child2_wa = w_mid
-        child2_wb = wb_effective
-        logger.info(f"CBEAM {eid}: Linear interpolation - midpoint offset: {w_mid}")
+        orient_vec = np.array([0.0, 0.0, 1.0])
     
-    # Create 2 child beams
-    # Child 1 [GA, midpoint]: WA = parent's WA, WB = midpoint/nearest offset
-    # Child 2 [midpoint, GB]: WA = midpoint/nearest offset, WB = parent's WB
-    for child_nodes, pa_child, pb_child, sa_child, sb_child, c_wa, c_wb in [
-        ([ga, nm], pa, 0, sa, 0, child1_wa, child1_wb), 
-        ([nm, gb], 0, pb, 0, sb, child2_wa, child2_wb)
+    # Compute parent's y-axis (perpendicular to beam, in plane with orient_vec)
+    parent_y = orient_vec - np.dot(orient_vec, parent_axis) * parent_axis
+    parent_y_len = np.linalg.norm(parent_y)
+    if parent_y_len > 1e-10:
+        parent_y = parent_y / parent_y_len
+    else:
+        # Orient vec parallel to beam - use default
+        if abs(parent_axis[2]) < 0.9:
+            parent_y = np.cross(np.array([0., 0., 1.]), parent_axis)
+        else:
+            parent_y = np.cross(np.array([1., 0., 0.]), parent_axis)
+        parent_y = parent_y / np.linalg.norm(parent_y)
+    
+    # z-axis completes right-hand system
+    parent_z = np.cross(parent_axis, parent_y)
+    
+    # Transform offsets to global coordinates
+    # CBEAM offset W = [W1, W2, W3] where W1=y-offset, W2=z-offset, W3=x-offset (axial)
+    wa_global = wa_effective[0] * parent_y + wa_effective[1] * parent_z + wa_effective[2] * parent_axis
+    wb_global = wb_effective[0] * parent_y + wb_effective[1] * parent_z + wb_effective[2] * parent_axis
+    
+    # Linearly interpolate the GLOBAL offset at the midpoint
+    wm_global = (wa_global + wb_global) / 2.0
+    
+    logger.info(f"CBEAM {eid}: WA global={wa_global}, WB global={wb_global}, WM global={wm_global}")
+    
+    # Now compute each child's local coordinate system and transform offsets back
+    child_data = []
+    for child_ga, child_gb, end_a_offset_global, end_b_offset_global, pa_c, pb_c, sa_c, sb_c in [
+        (ga, nm, wa_global, wm_global, pa, 0, sa, 0),  # Child 1: GA to midpoint
+        (nm, gb, wm_global, wb_global, 0, pb, 0, sb),   # Child 2: midpoint to GB
     ]:
+        # Child beam axis
+        child_ga_pos = get_grid_xyz(model, child_ga)
+        child_gb_pos = get_grid_xyz(model, child_gb)
+        child_axis = child_gb_pos - child_ga_pos
+        child_axis = child_axis / np.linalg.norm(child_axis)
+        
+        # Child y-axis: use SAME orientation vector as parent (maintain global y direction)
+        child_y = orient_vec - np.dot(orient_vec, child_axis) * child_axis
+        child_y_len = np.linalg.norm(child_y)
+        if child_y_len > 1e-10:
+            child_y = child_y / child_y_len
+        else:
+            child_y = parent_y  # Fallback
+        
+        child_z = np.cross(child_axis, child_y)
+        
+        # Compute X vector for this child (direction that gives us the y-axis we want)
+        # X vector should be such that projecting it perpendicular to beam axis gives child_y
+        # The simplest is to use orient_vec directly, or compute from child_y
+        child_x = list(orient_vec)  # Same orientation vector for all children
+        
+        # Transform global offsets to child's local coordinates
+        # Local = [dot(global, y), dot(global, z), dot(global, x)]
+        child_wa = [
+            float(np.dot(end_a_offset_global, child_y)),
+            float(np.dot(end_a_offset_global, child_z)),
+            float(np.dot(end_a_offset_global, child_axis)),
+        ]
+        child_wb = [
+            float(np.dot(end_b_offset_global, child_y)),
+            float(np.dot(end_b_offset_global, child_z)),
+            float(np.dot(end_b_offset_global, child_axis)),
+        ]
+        
+        child_data.append({
+            'nodes': [child_ga, child_gb],
+            'x': child_x,
+            'wa': child_wa,
+            'wb': child_wb,
+            'pa': pa_c,
+            'pb': pb_c,
+            'sa': sa_c,
+            'sb': sb_c,
+        })
+        
+        logger.info(f"CBEAM {eid}: Child [{child_ga}->{child_gb}] axis={child_axis}, y={child_y}")
+        logger.info(f"  -> WA (local): {child_wa}, WB (local): {child_wb}")
+    
+    # Create 2 child beams with properly transformed offsets
+    for cd in child_data:
         new_eid = id_alloc.allocate_element_id()
         new_elements.append({
             'type': 'CBEAM',
             'eid': new_eid,
             'pid': pid,
-            'nodes': child_nodes,
-            'g0': g0,
-            'x': x,
+            'nodes': cd['nodes'],
+            'g0': None,  # Use X vector, not G0 (since we computed child-specific X)
+            'x': cd['x'],
             'offt': offt,
             'bit': bit,
-            'pa': pa_child,
-            'pb': pb_child,
-            'wa': c_wa,
-            'wb': c_wb,
-            'sa': sa_child,
-            'sb': sb_child,
+            'pa': cd['pa'],
+            'pb': cd['pb'],
+            'wa': cd['wa'],
+            'wb': cd['wb'],
+            'sa': cd['sa'],
+            'sb': cd['sb'],
         })
-        logger.info(f"  -> Child CBEAM {new_eid}: nodes={child_nodes}, x={x}, wa={c_wa}, wb={c_wb}")
+        logger.info(f"  -> Child CBEAM {new_eid}: nodes={cd['nodes']}, x={cd['x']}, wa={cd['wa']}, wb={cd['wb']}")
         stats.elements_added += 1
 
 

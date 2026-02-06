@@ -535,14 +535,58 @@ def split_cbar(
     
     # Get orientation - could be G0 (node ID) or X vector
     g0 = elem.g0
-    x = elem.x
+    # Ensure X vector is copied correctly as [x1, x2, x3]
+    # pyNastran may return this as numpy array or in different formats
+    x = None
+    if elem.x is not None:
+        try:
+            x_raw = elem.x
+            if hasattr(x_raw, 'tolist'):
+                x = x_raw.tolist()  # numpy array -> list
+            elif isinstance(x_raw, (list, tuple)):
+                x = list(x_raw)
+            else:
+                x = [float(x_raw[0]), float(x_raw[1]), float(x_raw[2])]
+        except (IndexError, TypeError):
+            x = None
+    
+    # Log parent orientation for debugging
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.debug(f"CBAR {eid}: Parent orientation g0={g0}, x={x}")
     
     # Get optional fields
     offt = getattr(elem, 'offt', 'GGG')
     pa = getattr(elem, 'pa', 0)
     pb = getattr(elem, 'pb', 0)
-    wa = getattr(elem, 'wa', None)
-    wb = getattr(elem, 'wb', None)
+    
+    # Extract offset vectors WA and WB, converting to list format
+    wa = None
+    wb = None
+    wa_raw = getattr(elem, 'wa', None)
+    wb_raw = getattr(elem, 'wb', None)
+    if wa_raw is not None:
+        try:
+            if hasattr(wa_raw, 'tolist'):
+                wa = wa_raw.tolist()
+            elif isinstance(wa_raw, (list, tuple)):
+                wa = list(wa_raw)
+            else:
+                wa = [float(wa_raw[0]), float(wa_raw[1]), float(wa_raw[2])]
+        except (IndexError, TypeError):
+            wa = None
+    if wb_raw is not None:
+        try:
+            if hasattr(wb_raw, 'tolist'):
+                wb = wb_raw.tolist()
+            elif isinstance(wb_raw, (list, tuple)):
+                wb = list(wb_raw)
+            else:
+                wb = [float(wb_raw[0]), float(wb_raw[1]), float(wb_raw[2])]
+        except (IndexError, TypeError):
+            wb = None
+    
+    logger.debug(f"CBAR {eid}: Parent offsets wa={wa}, wb={wb}")
     
     # Get or create midpoint node (shared via edge cache)
     nm = get_or_create_midpoint_node(model, ga, gb, edge_cache, id_alloc, stats)
@@ -552,8 +596,6 @@ def split_cbar(
     if g0 is not None and g0 in (ga, gb, nm):
         # G0 conflicts with element nodes - convert to X vector instead
         # Calculate the orientation vector from parent element
-        import logging
-        logger = logging.getLogger(__name__)
         logger.warning(f"CBAR {eid}: G0={g0} conflicts with element nodes. "
                       f"Converting to X vector orientation.")
         try:
@@ -580,8 +622,16 @@ def split_cbar(
     elements_to_remove.add(eid)
     stats.elements_split += 1
     
+    # Log final orientation being used for children
+    logger.debug(f"CBAR {eid}: Child orientation will be g0={g0}, x={x}")
+    
     # Create 2 child bars
-    for child_nodes, pa_child, pb_child in [([ga, nm], pa, 0), ([nm, gb], 0, pb)]:
+    # Child 1 [GA, NM]: wa = parent's wa, wb = None (no offset at midpoint)
+    # Child 2 [NM, GB]: wa = None, wb = parent's wb
+    for child_nodes, pa_child, pb_child, wa_child, wb_child in [
+        ([ga, nm], pa, 0, wa, None), 
+        ([nm, gb], 0, pb, None, wb)
+    ]:
         new_eid = id_alloc.allocate_element_id()
         new_elements.append({
             'type': 'CBAR',
@@ -593,9 +643,10 @@ def split_cbar(
             'offt': offt,
             'pa': pa_child,
             'pb': pb_child,
-            'wa': wa,
-            'wb': wb,
+            'wa': wa_child,
+            'wb': wb_child,
         })
+        logger.debug(f"  Child CBAR {new_eid}: nodes={child_nodes}, g0={g0}, x={x}, wa={wa_child}, wb={wb_child}")
         stats.elements_added += 1
 
 
@@ -633,17 +684,61 @@ def split_cbeam(
     
     # Get orientation - could be G0 (node ID) or X vector
     g0 = elem.g0
-    x = elem.x
+    # Ensure X vector is copied correctly as [x1, x2, x3]
+    # pyNastran may return this as numpy array or in different formats
+    x = None
+    if elem.x is not None:
+        try:
+            x_raw = elem.x
+            if hasattr(x_raw, 'tolist'):
+                x = x_raw.tolist()  # numpy array -> list
+            elif isinstance(x_raw, (list, tuple)):
+                x = list(x_raw)
+            else:
+                x = [float(x_raw[0]), float(x_raw[1]), float(x_raw[2])]
+        except (IndexError, TypeError):
+            x = None
+    
+    # Log parent orientation for debugging
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.debug(f"CBEAM {eid}: Parent orientation g0={g0}, x={x}")
     
     # Get optional fields
     offt = getattr(elem, 'offt', 'GGG')
     bit = getattr(elem, 'bit', None)
     pa = getattr(elem, 'pa', 0)
     pb = getattr(elem, 'pb', 0)
-    wa = getattr(elem, 'wa', None)
-    wb = getattr(elem, 'wb', None)
     sa = getattr(elem, 'sa', 0)
     sb = getattr(elem, 'sb', 0)
+    
+    # Extract offset vectors WA and WB, converting to list format
+    wa = None
+    wb = None
+    wa_raw = getattr(elem, 'wa', None)
+    wb_raw = getattr(elem, 'wb', None)
+    if wa_raw is not None:
+        try:
+            if hasattr(wa_raw, 'tolist'):
+                wa = wa_raw.tolist()
+            elif isinstance(wa_raw, (list, tuple)):
+                wa = list(wa_raw)
+            else:
+                wa = [float(wa_raw[0]), float(wa_raw[1]), float(wa_raw[2])]
+        except (IndexError, TypeError):
+            wa = None
+    if wb_raw is not None:
+        try:
+            if hasattr(wb_raw, 'tolist'):
+                wb = wb_raw.tolist()
+            elif isinstance(wb_raw, (list, tuple)):
+                wb = list(wb_raw)
+            else:
+                wb = [float(wb_raw[0]), float(wb_raw[1]), float(wb_raw[2])]
+        except (IndexError, TypeError):
+            wb = None
+    
+    logger.debug(f"CBEAM {eid}: Parent offsets wa={wa}, wb={wb}")
     
     # Get or create midpoint node (shared via edge cache)
     nm = get_or_create_midpoint_node(model, ga, gb, edge_cache, id_alloc, stats)
@@ -652,8 +747,6 @@ def split_cbeam(
     # If G0 is the midpoint or one of the original nodes, we have a problem
     if g0 is not None and g0 in (ga, gb, nm):
         # G0 conflicts with element nodes - convert to X vector instead
-        import logging
-        logger = logging.getLogger(__name__)
         logger.warning(f"CBEAM {eid}: G0={g0} conflicts with element nodes. "
                       f"Converting to X vector orientation.")
         try:
@@ -680,10 +773,15 @@ def split_cbeam(
     elements_to_remove.add(eid)
     stats.elements_split += 1
     
+    # Log final orientation being used for children
+    logger.debug(f"CBEAM {eid}: Child orientation will be g0={g0}, x={x}")
+    
     # Create 2 child beams
-    for child_nodes, pa_child, pb_child, sa_child, sb_child in [
-        ([ga, nm], pa, 0, sa, 0), 
-        ([nm, gb], 0, pb, 0, sb)
+    # Child 1 [GA, NM]: wa = parent's wa, wb = None (no offset at midpoint)
+    # Child 2 [NM, GB]: wa = None, wb = parent's wb
+    for child_nodes, pa_child, pb_child, sa_child, sb_child, wa_child, wb_child in [
+        ([ga, nm], pa, 0, sa, 0, wa, None), 
+        ([nm, gb], 0, pb, 0, sb, None, wb)
     ]:
         new_eid = id_alloc.allocate_element_id()
         new_elements.append({
@@ -697,11 +795,12 @@ def split_cbeam(
             'bit': bit,
             'pa': pa_child,
             'pb': pb_child,
-            'wa': wa,
-            'wb': wb,
+            'wa': wa_child,
+            'wb': wb_child,
             'sa': sa_child,
             'sb': sb_child,
         })
+        logger.debug(f"  Child CBEAM {new_eid}: nodes={child_nodes}, g0={g0}, x={x}, wa={wa_child}, wb={wb_child}")
         stats.elements_added += 1
 
 
@@ -1037,6 +1136,52 @@ def run_refinement_pass(
     return stats
 
 
+def calculate_total_mass(model: BDF, mass_to_lbs_factor: float = 396.4) -> Tuple[float, float]:
+    """
+    Calculate total mass of the model.
+    
+    Args:
+        model: pyNastran BDF model (must be cross-referenced)
+        mass_to_lbs_factor: Conversion factor from model mass units to lbs
+        
+    Returns:
+        Tuple of (mass_in_model_units, mass_in_lbs)
+    """
+    try:
+        # Use get_mass_breakdown which returns a dictionary with mass by property
+        mass_breakdown = model.get_mass_breakdown(stop_on_failure=False)
+        # Sum up all masses
+        total_mass = 0.0
+        for pid, mass_data in mass_breakdown.items():
+            if isinstance(mass_data, (int, float)):
+                total_mass += mass_data
+            elif isinstance(mass_data, dict):
+                # Some versions return nested dicts
+                for key, val in mass_data.items():
+                    if isinstance(val, (int, float)):
+                        total_mass += val
+        mass_lbs = total_mass * mass_to_lbs_factor
+        return (total_mass, mass_lbs)
+    except Exception as e:
+        # If mass calculation fails, try alternative method
+        try:
+            # Try summing element masses directly
+            total_mass = 0.0
+            for eid, elem in model.elements.items():
+                try:
+                    elem_mass = elem.Mass()
+                    total_mass += elem_mass
+                except:
+                    pass
+            mass_lbs = total_mass * mass_to_lbs_factor
+            return (total_mass, mass_lbs)
+        except:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Could not calculate mass: {e}")
+            return (0.0, 0.0)
+
+
 def refine_mesh(
     input_file: str,
     output_file: str,
@@ -1046,6 +1191,7 @@ def refine_mesh(
     eid_range: Optional[Tuple[int, int]] = None,
     start_nid: Optional[int] = None,
     start_eid: Optional[int] = None,
+    mass_to_lbs_factor: float = 396.4,
     verbose: bool = False
 ) -> Dict:
     """
@@ -1060,6 +1206,7 @@ def refine_mesh(
         eid_range: Optional (min, max) element ID range to refine
         start_nid: Optional starting node ID for new nodes (default: max+1)
         start_eid: Optional starting element ID for new elements (default: max+1)
+        mass_to_lbs_factor: Conversion factor from model mass units to lbs (default: 396.4)
         verbose: Enable verbose logging
         
     Returns:
@@ -1095,6 +1242,11 @@ def refine_mesh(
     logger.info(f"Initial mesh: {initial_nodes} nodes, {initial_elements} elements")
     logger.info(f"  2D: {initial_quads} CQUAD4, {initial_tris} CTRIA3")
     logger.info(f"  1D: {initial_bars} CBAR, {initial_beams} CBEAM, {initial_rods} CROD")
+    
+    # Calculate initial mass
+    initial_mass, initial_mass_lbs = calculate_total_mass(model, mass_to_lbs_factor)
+    logger.info(f"Initial mass: {initial_mass:.6f} (model units) = {initial_mass_lbs:.2f} lbs")
+    
     logger.info(f"Target edge length: {target_edge_length}")
     logger.info(f"Max passes: {max_passes}")
     
@@ -1247,6 +1399,23 @@ def refine_mesh(
     else:
         logger.warning(f"✗ {violations} elements still exceed target edge length")
     
+    # Check 4: Mass conservation
+    final_mass, final_mass_lbs = calculate_total_mass(model, mass_to_lbs_factor)
+    mass_diff = abs(final_mass - initial_mass)
+    mass_diff_pct = (mass_diff / initial_mass * 100) if initial_mass > 0 else 0
+    
+    logger.info(f"\n--- Mass Check ---")
+    logger.info(f"Initial mass: {initial_mass:.6f} (model units) = {initial_mass_lbs:.2f} lbs")
+    logger.info(f"Final mass:   {final_mass:.6f} (model units) = {final_mass_lbs:.2f} lbs")
+    logger.info(f"Difference:   {mass_diff:.6f} ({mass_diff_pct:.4f}%)")
+    
+    if mass_diff_pct < 0.01:  # Less than 0.01% difference
+        logger.info("✓ Mass preserved (< 0.01% change)")
+    elif mass_diff_pct < 0.1:  # Less than 0.1% difference
+        logger.warning(f"⚠ Small mass change detected ({mass_diff_pct:.4f}%)")
+    else:
+        logger.error(f"✗ Significant mass change detected ({mass_diff_pct:.4f}%)! Check for errors.")
+    
     # Check for ID overflow (8-character field limit = 99999999)
     MAX_ID = 99999999
     max_nid = max(model.nodes.keys()) if model.nodes else 0
@@ -1287,6 +1456,11 @@ def refine_mesh(
     total_stats['initial_elements'] = initial_elements
     total_stats['final_elements'] = final_elements
     total_stats['violations'] = violations
+    total_stats['initial_mass'] = initial_mass
+    total_stats['final_mass'] = final_mass
+    total_stats['initial_mass_lbs'] = initial_mass_lbs
+    total_stats['final_mass_lbs'] = final_mass_lbs
+    total_stats['mass_diff_pct'] = mass_diff_pct
     
     return total_stats
 
@@ -1475,6 +1649,8 @@ Examples:
                         help='Starting node ID for new nodes (default: max_existing + 1)')
     parser.add_argument('--start-eid', type=int,
                         help='Starting element ID for new elements (default: max_existing + 1)')
+    parser.add_argument('--mass-factor', type=float, default=396.4,
+                        help='Mass conversion factor to lbs (default: 396.4)')
     parser.add_argument('--verbose', '-v', action='store_true',
                         help='Enable verbose logging')
     parser.add_argument('--test', action='store_true',
@@ -1510,6 +1686,7 @@ Examples:
             eid_range=eid_range,
             start_nid=args.start_nid,
             start_eid=args.start_eid,
+            mass_to_lbs_factor=args.mass_factor,
             verbose=args.verbose
         )
     except FileNotFoundError as e:

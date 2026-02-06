@@ -860,23 +860,71 @@ def split_cbar(
         {'nodes': [nm, gb], 'wa': child2_wa, 'wb': child2_wb, 'pa': 0, 'pb': pb},
     ]
     
-    # Create 2 child bars - keep parent's orientation (g0 or x)
-    for cd in child_data:
+    # Determine if we need to recompute X vector for child 2
+    # If GA has a cylindrical CD and the parent's X vector is along the cylindrical axis,
+    # child 2 should use the negative radial direction at GA's position instead
+    x_child1 = x
+    x_child2 = x
+    g0_child1 = g0
+    g0_child2 = g0
+    
+    if x is not None and ga in model.nodes:
+        ga_node = model.nodes[ga]
+        ga_cd = getattr(ga_node, 'cd', 0) or 0
+        
+        if ga_cd != 0 and ga_cd in model.coords:
+            coord = model.coords[ga_cd]
+            if coord.type in ('CORD2C', 'CORD1C'):
+                # Get the cylindrical axis direction in global
+                cyl_axis = coord.k  # Unit vector along cylindrical Z axis
+                
+                # Check if parent's X is parallel to cylindrical axis
+                x_vec = np.array(x)
+                dot_product = abs(np.dot(x_vec, cyl_axis))
+                
+                if dot_product > 0.9:  # X is nearly parallel to cylindrical axis
+                    # Recompute X for child 2 as negative radial direction at GA
+                    try:
+                        ga_pos_global = get_grid_xyz(model, ga)
+                        ga_pos_local = coord.transform_node_to_local(ga_pos_global)
+                        theta_rad = np.radians(ga_pos_local[1])
+                        
+                        # Radial direction at this theta
+                        x_axis_global = coord.i  # theta=0 direction
+                        y_axis_global = coord.j  # perpendicular in R-theta plane
+                        
+                        e_r = np.cos(theta_rad) * x_axis_global + np.sin(theta_rad) * y_axis_global
+                        
+                        # Use NEGATIVE radial direction (matches FEMAP behavior)
+                        x_child2 = list(-e_r)
+                        g0_child2 = None  # Clear G0 when using computed X
+                        
+                        logger.info(f"CBAR {eid}: Recomputing X for child 2 (GA in cylindrical CD={ga_cd})")
+                        logger.info(f"  Parent X = {x} (parallel to cyl axis {list(cyl_axis)})")
+                        logger.info(f"  Child 2 X = {x_child2} (negative radial at theta={ga_pos_local[1]:.1f}°)")
+                    except Exception as e:
+                        logger.warning(f"CBAR {eid}: Failed to recompute X for child 2: {e}")
+    
+    # Create 2 child bars
+    for i, cd in enumerate(child_data):
         new_eid = id_alloc.allocate_element_id()
+        child_x = x_child1 if i == 0 else x_child2
+        child_g0 = g0_child1 if i == 0 else g0_child2
+        
         new_elements.append({
             'type': 'CBAR',
             'eid': new_eid,
             'pid': pid,
             'nodes': cd['nodes'],
-            'g0': g0,  # Keep parent's G0
-            'x': x,    # Keep parent's X vector
+            'g0': child_g0,
+            'x': child_x,
             'offt': offt,
             'pa': cd['pa'],
             'pb': cd['pb'],
             'wa': cd['wa'],
             'wb': cd['wb'],
         })
-        logger.info(f"  -> Child CBAR {new_eid}: nodes={cd['nodes']}, x={x}, wa={cd['wa']}, wb={cd['wb']}")
+        logger.info(f"  -> Child CBAR {new_eid}: nodes={cd['nodes']}, x={child_x}, wa={cd['wa']}, wb={cd['wb']}")
         stats.elements_added += 1
 
 
@@ -1076,16 +1124,64 @@ def split_cbeam(
         {'nodes': [nm, gb], 'wa': child2_wa, 'wb': child2_wb, 'pa': 0, 'pb': pb, 'sa': 0, 'sb': sb},
     ]
     
-    # Create 2 child beams - keep parent's orientation (g0 or x)
-    for cd in child_data:
+    # Determine if we need to recompute X vector for child 2
+    # If GA has a cylindrical CD and the parent's X vector is along the cylindrical axis,
+    # child 2 should use the negative radial direction at GA's position instead
+    x_child1 = x
+    x_child2 = x
+    g0_child1 = g0
+    g0_child2 = g0
+    
+    if x is not None and ga in model.nodes:
+        ga_node = model.nodes[ga]
+        ga_cd = getattr(ga_node, 'cd', 0) or 0
+        
+        if ga_cd != 0 and ga_cd in model.coords:
+            coord = model.coords[ga_cd]
+            if coord.type in ('CORD2C', 'CORD1C'):
+                # Get the cylindrical axis direction in global
+                cyl_axis = coord.k  # Unit vector along cylindrical Z axis
+                
+                # Check if parent's X is parallel to cylindrical axis
+                x_vec = np.array(x)
+                dot_product = abs(np.dot(x_vec, cyl_axis))
+                
+                if dot_product > 0.9:  # X is nearly parallel to cylindrical axis
+                    # Recompute X for child 2 as negative radial direction at GA
+                    try:
+                        ga_pos_global = get_grid_xyz(model, ga)
+                        ga_pos_local = coord.transform_node_to_local(ga_pos_global)
+                        theta_rad = np.radians(ga_pos_local[1])
+                        
+                        # Radial direction at this theta
+                        x_axis_global = coord.i  # theta=0 direction
+                        y_axis_global = coord.j  # perpendicular in R-theta plane
+                        
+                        e_r = np.cos(theta_rad) * x_axis_global + np.sin(theta_rad) * y_axis_global
+                        
+                        # Use NEGATIVE radial direction (matches FEMAP behavior)
+                        x_child2 = list(-e_r)
+                        g0_child2 = None  # Clear G0 when using computed X
+                        
+                        logger.info(f"CBEAM {eid}: Recomputing X for child 2 (GA in cylindrical CD={ga_cd})")
+                        logger.info(f"  Parent X = {x} (parallel to cyl axis {list(cyl_axis)})")
+                        logger.info(f"  Child 2 X = {x_child2} (negative radial at theta={ga_pos_local[1]:.1f}°)")
+                    except Exception as e:
+                        logger.warning(f"CBEAM {eid}: Failed to recompute X for child 2: {e}")
+    
+    # Create 2 child beams
+    for i, cd in enumerate(child_data):
         new_eid = id_alloc.allocate_element_id()
+        child_x = x_child1 if i == 0 else x_child2
+        child_g0 = g0_child1 if i == 0 else g0_child2
+        
         new_elements.append({
             'type': 'CBEAM',
             'eid': new_eid,
             'pid': pid,
             'nodes': cd['nodes'],
-            'g0': g0,  # Keep parent's G0
-            'x': x,    # Keep parent's X vector
+            'g0': child_g0,
+            'x': child_x,
             'offt': offt,
             'bit': bit,
             'pa': cd['pa'],
@@ -1095,7 +1191,7 @@ def split_cbeam(
             'sa': cd['sa'],
             'sb': cd['sb'],
         })
-        logger.info(f"  -> Child CBEAM {new_eid}: nodes={cd['nodes']}, x={x}, wa={cd['wa']}, wb={cd['wb']}")
+        logger.info(f"  -> Child CBEAM {new_eid}: nodes={cd['nodes']}, x={child_x}, wa={cd['wa']}, wb={cd['wb']}")
         stats.elements_added += 1
 
 

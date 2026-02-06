@@ -642,11 +642,19 @@ def split_cbar(
     wa_effective = wa if wa is not None else zero_offset
     wb_effective = wb if wb is not None else zero_offset
     
-    # Create 2 child bars
-    # Both children inherit parent's WA and WB to preserve offsets through refinement chain
-    for child_nodes, pa_child, pb_child in [
-        ([ga, nm], pa, 0), 
-        ([nm, gb], 0, pb)
+    # Compute interpolated midpoint offset (linear interpolation of WA and WB)
+    w_mid = [
+        (wa_effective[0] + wb_effective[0]) / 2.0,
+        (wa_effective[1] + wb_effective[1]) / 2.0,
+        (wa_effective[2] + wb_effective[2]) / 2.0,
+    ]
+    
+    # Create 2 child bars with linearly interpolated offsets
+    # Child 1 [GA, midpoint]: WA = parent's WA, WB = midpoint offset
+    # Child 2 [midpoint, GB]: WA = midpoint offset, WB = parent's WB
+    for child_nodes, pa_child, pb_child, child_wa, child_wb in [
+        ([ga, nm], pa, 0, wa_effective, w_mid), 
+        ([nm, gb], 0, pb, w_mid, wb_effective)
     ]:
         new_eid = id_alloc.allocate_element_id()
         new_elements.append({
@@ -659,10 +667,10 @@ def split_cbar(
             'offt': offt,
             'pa': pa_child,
             'pb': pb_child,
-            'wa': wa_effective,
-            'wb': wb_effective,
+            'wa': child_wa,
+            'wb': child_wb,
         })
-        logger.info(f"  -> Child CBAR {new_eid}: nodes={child_nodes}, x={x}, wa={wa_effective}, wb={wb_effective}")
+        logger.info(f"  -> Child CBAR {new_eid}: nodes={child_nodes}, x={x}, wa={child_wa}, wb={child_wb}")
         stats.elements_added += 1
 
 
@@ -803,11 +811,19 @@ def split_cbeam(
     wa_effective = wa if wa is not None else zero_offset
     wb_effective = wb if wb is not None else zero_offset
     
-    # Create 2 child beams
-    # Both children inherit parent's WA and WB to preserve offsets through refinement chain
-    for child_nodes, pa_child, pb_child, sa_child, sb_child in [
-        ([ga, nm], pa, 0, sa, 0), 
-        ([nm, gb], 0, pb, 0, sb)
+    # Compute interpolated midpoint offset (linear interpolation of WA and WB)
+    w_mid = [
+        (wa_effective[0] + wb_effective[0]) / 2.0,
+        (wa_effective[1] + wb_effective[1]) / 2.0,
+        (wa_effective[2] + wb_effective[2]) / 2.0,
+    ]
+    
+    # Create 2 child beams with linearly interpolated offsets
+    # Child 1 [GA, midpoint]: WA = parent's WA, WB = midpoint offset
+    # Child 2 [midpoint, GB]: WA = midpoint offset, WB = parent's WB
+    for child_nodes, pa_child, pb_child, sa_child, sb_child, child_wa, child_wb in [
+        ([ga, nm], pa, 0, sa, 0, wa_effective, w_mid), 
+        ([nm, gb], 0, pb, 0, sb, w_mid, wb_effective)
     ]:
         new_eid = id_alloc.allocate_element_id()
         new_elements.append({
@@ -821,12 +837,12 @@ def split_cbeam(
             'bit': bit,
             'pa': pa_child,
             'pb': pb_child,
-            'wa': wa_effective,
-            'wb': wb_effective,
+            'wa': child_wa,
+            'wb': child_wb,
             'sa': sa_child,
             'sb': sb_child,
         })
-        logger.info(f"  -> Child CBEAM {new_eid}: nodes={child_nodes}, x={x}, wa={wa_effective}, wb={wb_effective}")
+        logger.info(f"  -> Child CBEAM {new_eid}: nodes={child_nodes}, x={x}, wa={child_wa}, wb={child_wb}")
         stats.elements_added += 1
 
 

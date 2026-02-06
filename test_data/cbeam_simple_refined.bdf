@@ -1,0 +1,21 @@
+$pyNastran: version=msc
+$pyNastran: punch=True
+$pyNastran: encoding=utf-8
+$pyNastran: nnodes=3
+$pyNastran: nelements=2
+$NODES
+$NODES
+GRID           1              0.      0.      0.
+GRID           2             10.      0.      0.
+GRID         100              5.      0.      0.               0        
+$ELEMENTS
+CBEAM        100       1       1     100      0.      1.      0.
+                                              1.                      2.
+CBEAM        101       1     100       2      0.      1.      0.
+                                              2.                      3.
+$PROPERTIES
+$PROPERTIES
+PBAR           1       1      1.      1.      1.      1.
+$MATERIALS
+$MATERIALS
+MAT1           1    1.+7              .3      .1

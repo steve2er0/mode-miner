@@ -312,19 +312,80 @@ def fix_oml(
                 f"radial plane={axis_names[r1_idx]},{axis_names[r2_idx]})")
     logger.info(f"Cylinder center in radial plane: ({center[0]}, {center[1]})")
     
-    # Detect or use specified radius (only from eligible nodes if PID-filtered)
-    if target_radius is None:
-        target_radius = detect_cylinder_radius(model, axis, center, eligible_nids)
-        logger.info(f"Auto-detected target radius: {target_radius:.4f}")
-    else:
-        logger.info(f"Using specified target radius: {target_radius:.4f}")
+    # Compute per-station target radii
+    # Group eligible nodes by their axial position (X station) and find the
+    # maximum radius at each station. This handles tapered/varying cylinders.
     
-    # Compute tolerance band
-    tolerance = tolerance_pct / 100.0 * target_radius
-    r_min = target_radius - tolerance
-    r_max = target_radius + tolerance
-    logger.info(f"Tolerance: {tolerance:.4f} ({tolerance_pct}% of radius)")
-    logger.info(f"Fixing nodes with radius in [{r_min:.4f}, {r_max:.4f}]")
+    # First, gather all eligible node positions
+    node_axial_positions = {}  # nid -> (axial_pos, radial_dist, global_pos)
+    for nid, node in model.nodes.items():
+        if eligible_nids is not None and nid not in eligible_nids:
+            continue
+        pos = node.get_position()
+        axial_pos = pos[ax_idx]
+        r1 = pos[r1_idx] - center[0]
+        r2 = pos[r2_idx] - center[1]
+        r = np.sqrt(r1**2 + r2**2)
+        node_axial_positions[nid] = (axial_pos, r, pos)
+    
+    if target_radius is not None:
+        # User specified a single radius - use it everywhere
+        logger.info(f"Using specified target radius: {target_radius:.4f} (uniform)")
+        station_radii = None  # Signals "use uniform radius"
+        
+        # Compute tolerance band
+        tolerance = tolerance_pct / 100.0 * target_radius
+        r_min_global = target_radius - tolerance
+        r_max_global = target_radius + tolerance
+        logger.info(f"Tolerance: {tolerance:.4f} ({tolerance_pct}% of radius)")
+        logger.info(f"Fixing nodes with radius in [{r_min_global:.4f}, {r_max_global:.4f}]")
+    else:
+        # Auto-detect: group nodes by axial station and find max R at each
+        # Use a binning approach to handle floating-point X positions
+        from collections import defaultdict
+        
+        # Determine bin resolution from the data
+        axial_values = sorted(set(round(v[0], 2) for v in node_axial_positions.values()))
+        if len(axial_values) > 1:
+            min_gap = min(axial_values[i+1] - axial_values[i] 
+                         for i in range(len(axial_values) - 1))
+            bin_size = min_gap / 2.0  # Half the minimum gap between stations
+        else:
+            bin_size = 0.1
+        
+        # Bin nodes by axial position
+        station_bins = defaultdict(list)  # bin_key -> [(nid, r)]
+        for nid, (axial_pos, r, pos) in node_axial_positions.items():
+            bin_key = round(axial_pos / bin_size) * bin_size
+            station_bins[bin_key].append((nid, r))
+        
+        # Find max radius at each station (these are the original polygon vertices)
+        station_radii = {}  # bin_key -> target_radius
+        for bin_key in sorted(station_bins.keys()):
+            radii_at_station = [r for _, r in station_bins[bin_key]]
+            max_r = max(radii_at_station)
+            station_radii[bin_key] = max_r
+            n_nodes = len(radii_at_station)
+            min_r = min(radii_at_station)
+            logger.info(f"  Station {axis}={bin_key:.2f}: {n_nodes} nodes, "
+                       f"R_max={max_r:.4f}, R_min={min_r:.4f}, "
+                       f"spread={max_r - min_r:.4f}")
+        
+        # Build a lookup: nid -> target_radius for that node's station
+        # Also store bin_key per nid for later use
+        node_target_radius = {}  # nid -> target_radius
+        node_bin_key = {}  # nid -> bin_key
+        for bin_key, nid_list in station_bins.items():
+            for nid, r in nid_list:
+                node_target_radius[nid] = station_radii[bin_key]
+                node_bin_key[nid] = bin_key
+        
+        # For tolerance, use the overall max radius
+        overall_max_r = max(station_radii.values())
+        overall_min_target = min(station_radii.values())
+        tolerance = tolerance_pct / 100.0 * overall_max_r
+        logger.info(f"\nPer-station radius range: {overall_min_target:.4f} to {overall_max_r:.4f}")
+        logger.info(f"Tolerance: {tolerance:.4f} ({tolerance_pct}% of max radius)")
     
     # Process each node
     stats = {
@@ -455,7 +516,7 @@ def fix_oml(
     if beam_orientations:
         logger.info(f"Saved orientation for {len(beam_orientations)} 1D elements")
     
-    # PHASE 2: Move nodes to target radius
+    # PHASE 2: Move nodes to target radius (per-station or uniform)
     for nid, node in model.nodes.items():
         # Check eligibility (PID + NID filter)
         if eligible_nids is not None and nid not in eligible_nids:
@@ -470,6 +531,23 @@ def fix_oml(
         r2 = pos_global[r2_idx] - center[1]
         current_r = np.sqrt(r1**2 + r2**2)
         
+        # Determine the target radius for this node
+        if station_radii is not None and target_radius is None:
+            # Per-station mode: look up this node's target radius
+            if nid in node_target_radius:
+                node_target_r = node_target_radius[nid]
+            else:
+                stats['nodes_skipped_not_eligible'] += 1
+                continue
+        else:
+            # Uniform mode
+            node_target_r = target_radius
+        
+        # Compute tolerance band for this node's station
+        node_tolerance = tolerance_pct / 100.0 * node_target_r
+        r_min = node_target_r - node_tolerance
+        r_max = node_target_r + node_tolerance
+        
         # Check if node is in the tolerance band
         if current_r < r_min or current_r > r_max:
             stats['nodes_skipped_outside_band'] += 1
@@ -478,7 +556,7 @@ def fix_oml(
         stats['nodes_in_band'] += 1
         
         # Check if already at target radius
-        if abs(current_r - target_radius) < 1e-6:
+        if abs(current_r - node_target_r) < 1e-6:
             stats['nodes_skipped_already_correct'] += 1
             logger.debug(f"Node {nid}: Already at target radius ({current_r:.6f})")
             continue
@@ -488,15 +566,15 @@ def fix_oml(
             logger.warning(f"Node {nid}: On the axis (R={current_r:.6f}), skipping")
             continue
         
-        scale = target_radius / current_r
-        radial_correction = target_radius - current_r
+        scale = node_target_r / current_r
+        radial_correction = node_target_r - current_r
         
         # Compute new global position (only change radial components)
         new_pos_global = pos_global.copy()
         new_pos_global[r1_idx] = center[0] + r1 * scale
         new_pos_global[r2_idx] = center[1] + r2 * scale
         
-        logger.debug(f"Node {nid}: R={current_r:.4f} -> {target_radius:.4f} "
+        logger.debug(f"Node {nid}: R={current_r:.4f} -> {node_target_r:.4f} "
                      f"(correction={radial_correction:+.4f})")
         
         # Now we need to write the new position back in the node's input
@@ -520,8 +598,8 @@ def fix_oml(
             if coord.type in ('CORD2C', 'CORD1C'):
                 # Cylindrical: just update the R component
                 # node.xyz = [R, theta, Z] in the cylindrical system
-                node.xyz[0] = target_radius
-                logger.debug(f"  Node {nid}: Cylindrical CP={cp_val}, setting R={target_radius:.4f}")
+                node.xyz[0] = node_target_r
+                logger.debug(f"  Node {nid}: Cylindrical CP={cp_val}, setting R={node_target_r:.4f}")
             elif coord.type in ('CORD2R', 'CORD1R'):
                 # Rectangular local: transform back
                 try:
@@ -668,7 +746,11 @@ def fix_oml(
     if corrections:
         logger.info(f"Max radial correction: {stats['max_radial_correction']:.4f}")
         logger.info(f"Avg radial correction: {stats['avg_radial_correction']:.4f}")
-    logger.info(f"Target radius: {target_radius:.4f}")
+    if target_radius is not None:
+        logger.info(f"Target radius: {target_radius:.4f} (uniform)")
+    elif station_radii:
+        logger.info(f"Target radius: per-station ({len(station_radii)} stations, "
+                    f"range {min(station_radii.values()):.4f} to {max(station_radii.values()):.4f})")
     if stats.get('orientations_fixed', 0) > 0:
         logger.info(f"1D element orientations fixed: {stats['orientations_fixed']}")
     

@@ -57,6 +57,8 @@ import numpy as np
 
 try:
     from pyNastran.bdf.bdf import BDF
+    from pyNastran.bdf.cards.elements.bars import CBAR
+    from pyNastran.bdf.cards.elements.beam import CBEAM
 except ImportError:
     print("ERROR: pyNastran is required. Install with: pip install pyNastran")
     sys.exit(1)
@@ -339,7 +341,80 @@ def fix_oml(
     }
     
     corrections = []
+    moved_nids = set()  # Track which nodes we actually move
     
+    # PHASE 1: Save old global positions for all nodes, and compute the beam
+    # local y-axis for any 1D element connected to eligible nodes.
+    # We need the old geometry to preserve the beam orientation.
+    old_positions = {}  # nid -> old global position
+    for nid, node in model.nodes.items():
+        old_positions[nid] = node.get_position().copy()
+    
+    beam_orientations = {}  # eid -> old beam y-axis (unit vector in global)
+    bar_beam_types = (CBAR, CBEAM)
+    for eid, elem in model.elements.items():
+        if not isinstance(elem, bar_beam_types):
+            continue
+        
+        # Check if this element has any eligible nodes
+        elem_nids = []
+        for n in elem.nodes[:2]:
+            if hasattr(n, 'nid'):
+                elem_nids.append(n.nid)
+            elif isinstance(n, int):
+                elem_nids.append(n)
+        
+        if eligible_nids is not None and not any(n in eligible_nids for n in elem_nids):
+            continue
+        
+        # Compute the beam's local y-axis from old geometry
+        ga, gb = elem_nids[0], elem_nids[1]
+        ga_pos = old_positions[ga]
+        gb_pos = old_positions[gb]
+        
+        beam_axis = gb_pos - ga_pos
+        beam_len = np.linalg.norm(beam_axis)
+        if beam_len < 1e-10:
+            continue
+        beam_axis = beam_axis / beam_len
+        
+        # Get the X vector (orientation vector)
+        x_vec = None
+        g0 = getattr(elem, 'g0', None)
+        if g0 is not None:
+            # G0 is a node ID - compute direction from GA to G0
+            if hasattr(g0, 'nid'):
+                g0_nid = g0.nid
+            else:
+                g0_nid = g0
+            if g0_nid in old_positions:
+                g0_pos = old_positions[g0_nid]
+                x_vec = g0_pos - ga_pos
+        else:
+            x_raw = getattr(elem, 'x', None)
+            if x_raw is not None:
+                if hasattr(x_raw, 'tolist'):
+                    x_vec = x_raw.copy()
+                else:
+                    x_vec = np.array(x_raw, dtype=float)
+        
+        if x_vec is None:
+            continue
+        
+        # Compute beam y-axis: y = normalize(X - (X.dot(axis)) * axis)
+        x_proj = x_vec - np.dot(x_vec, beam_axis) * beam_axis
+        x_proj_len = np.linalg.norm(x_proj)
+        if x_proj_len < 1e-10:
+            continue
+        y_axis = x_proj / x_proj_len
+        
+        beam_orientations[eid] = y_axis
+        logger.debug(f"  1D elem {eid}: saved y-axis = {[round(v,6) for v in y_axis]}")
+    
+    if beam_orientations:
+        logger.info(f"Saved orientation for {len(beam_orientations)} 1D elements")
+    
+    # PHASE 2: Move nodes to target radius
     for nid, node in model.nodes.items():
         # Check eligibility (PID + NID filter)
         if eligible_nids is not None and nid not in eligible_nids:
@@ -347,7 +422,7 @@ def fix_oml(
             continue
         
         # Get global position
-        pos_global = node.get_position()
+        pos_global = old_positions[nid]
         
         # Compute current radial distance
         r1 = pos_global[r1_idx] - center[0]
@@ -423,12 +498,75 @@ def fix_oml(
                 continue
         
         stats['nodes_fixed'] += 1
+        moved_nids.add(nid)
         corrections.append(abs(radial_correction))
     
     # Compute correction statistics
     if corrections:
         stats['max_radial_correction'] = max(corrections)
         stats['avg_radial_correction'] = sum(corrections) / len(corrections)
+    
+    # PHASE 3: Fix 1D element orientations affected by node movement
+    # The beam axis has changed slightly, so we recompute X vectors to
+    # preserve the original beam y-axis direction.
+    stats['orientations_fixed'] = 0
+    
+    if moved_nids and beam_orientations:
+        # Re-cross-reference so get_position() works with new coordinates
+        try:
+            model.cross_reference()
+        except Exception:
+            pass
+        
+        for eid, old_y_axis in beam_orientations.items():
+            elem = model.elements[eid]
+            
+            # Get new node positions
+            elem_nids = []
+            for n in elem.nodes[:2]:
+                if hasattr(n, 'nid'):
+                    elem_nids.append(n.nid)
+                elif isinstance(n, int):
+                    elem_nids.append(n)
+            
+            ga, gb = elem_nids[0], elem_nids[1]
+            
+            # Skip if neither node was moved
+            if ga not in moved_nids and gb not in moved_nids:
+                continue
+            
+            # Get new positions
+            ga_pos_new = model.nodes[ga].get_position()
+            gb_pos_new = model.nodes[gb].get_position()
+            
+            # New beam axis
+            new_axis = gb_pos_new - ga_pos_new
+            new_len = np.linalg.norm(new_axis)
+            if new_len < 1e-10:
+                continue
+            new_axis = new_axis / new_len
+            
+            # The old y-axis may no longer be exactly perpendicular to the new axis.
+            # Project it to be perpendicular to the new axis.
+            y_proj = old_y_axis - np.dot(old_y_axis, new_axis) * new_axis
+            y_proj_len = np.linalg.norm(y_proj)
+            if y_proj_len < 1e-10:
+                logger.warning(f"  1D elem {eid}: old y-axis parallel to new beam axis, skipping")
+                continue
+            new_y_axis = y_proj / y_proj_len
+            
+            # The X vector just needs to not be parallel to the beam axis
+            # and to produce the correct y-axis. The y-axis IS a valid X vector.
+            new_x = list(new_y_axis)
+            
+            # Update the element: set X vector, clear G0
+            elem.g0 = None
+            elem.x = np.array(new_x, dtype=float)
+            
+            logger.debug(f"  1D elem {eid}: X updated to {[round(v,6) for v in new_x]}")
+            stats['orientations_fixed'] += 1
+        
+        logger.info(f"1D element orientations fixed: {stats['orientations_fixed']}")
     
     # Print summary
     logger.info("")
@@ -450,6 +588,8 @@ def fix_oml(
         logger.info(f"Max radial correction: {stats['max_radial_correction']:.4f}")
         logger.info(f"Avg radial correction: {stats['avg_radial_correction']:.4f}")
     logger.info(f"Target radius: {target_radius:.4f}")
+    if stats.get('orientations_fixed', 0) > 0:
+        logger.info(f"1D element orientations fixed: {stats['orientations_fixed']}")
     
     # Write output
     logger.info(f"\nWriting fixed BDF: {output_file}")

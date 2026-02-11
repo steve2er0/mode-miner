@@ -8,22 +8,24 @@ detects the cylinder radius from the original nodes and projects all nodes
 radially outward to the true circular cross-section.
 
 USAGE:
-    python fix_oml.py --in refined.bdf --out fixed.bdf
-    python fix_oml.py --in refined.bdf --out fixed.bdf --radius 165.25
-    python fix_oml.py --in refined.bdf --out fixed.bdf --axis X --center 0,0
-    python fix_oml.py --in refined.bdf --out fixed.bdf --tolerance 0.5
+    python fix_oml.py --in refined.bdf --out fixed.bdf --punch
+    python fix_oml.py --in refined.bdf --out fixed.bdf --pids 100,101,102 --punch
+    python fix_oml.py --in refined.bdf --out fixed.bdf --pids 100 --radius 165.25
 
 OPTIONS:
     --in, -i          Input BDF file path (required)
     --out, -o         Output BDF file path (required)
+    --pids, -p        Comma-separated list of property IDs. Only nodes on
+                      elements with these PIDs will be fixed. This is the
+                      primary way to select the cylinder skin and avoid
+                      interior structure, feedlines, tunnels, etc.
     --radius, -r      Target cylinder radius (auto-detected if omitted)
     --axis, -a        Cylinder axis direction: X, Y, or Z (default: auto-detect)
     --center, -c      Cylinder center in the plane perpendicular to axis,
                       format: Y,Z or X,Z or X,Y (default: 0,0)
     --tolerance, -t   Max radial deviation from target to consider a node
                       "on the cylinder" (default: 5% of radius)
-    --nids            Comma-separated list of node IDs to fix (optional,
-                      default: fix all nodes within tolerance)
+    --nids            Comma-separated list of node IDs to fix (optional)
     --punch           Read BDF in punch mode (no executive/case control)
     --verbose, -v     Enable verbose logging
 
@@ -138,7 +140,49 @@ def get_radial_components(axis: str) -> Tuple[int, int, int]:
         raise ValueError(f"Invalid axis: {axis}. Must be X, Y, or Z.")
 
 
-def detect_cylinder_radius(model: BDF, axis: str, center: Tuple[float, float]) -> float:
+def get_nodes_for_pids(model: BDF, pids: List[int]) -> set:
+    """
+    Get all node IDs connected to elements with the specified property IDs.
+    
+    Args:
+        model: pyNastran BDF model
+        pids: List of property IDs to include
+        
+    Returns:
+        Set of node IDs belonging to elements with the given PIDs
+    """
+    pid_set = set(pids)
+    node_ids = set()
+    elem_count = 0
+    
+    for eid, elem in model.elements.items():
+        elem_pid = getattr(elem, 'pid', None)
+        # After cross-reference, pid may be an object
+        if hasattr(elem_pid, 'pid'):
+            elem_pid = elem_pid.pid
+        
+        if elem_pid in pid_set:
+            elem_count += 1
+            # Get node IDs from the element
+            nodes = getattr(elem, 'nodes', None) or getattr(elem, 'node_ids', [])
+            for n in nodes:
+                if hasattr(n, 'nid'):
+                    node_ids.add(n.nid)
+                elif isinstance(n, int):
+                    node_ids.add(n)
+    
+    logger.info(f"PID filter: {len(pids)} PIDs -> {elem_count} elements -> {len(node_ids)} nodes")
+    for pid in sorted(pids):
+        count = sum(1 for eid, elem in model.elements.items()
+                    if (getattr(elem, 'pid', None) if not hasattr(getattr(elem, 'pid', None), 'pid')
+                        else getattr(elem, 'pid', None).pid) == pid)
+        logger.info(f"  PID {pid}: {count} elements")
+    
+    return node_ids
+
+
+def detect_cylinder_radius(model: BDF, axis: str, center: Tuple[float, float],
+                           eligible_nids: Optional[set] = None) -> float:
     """
     Auto-detect the cylinder radius as the maximum radial distance from the axis.
     The original polygon vertices should be at the correct radius.
@@ -147,6 +191,7 @@ def detect_cylinder_radius(model: BDF, axis: str, center: Tuple[float, float]) -
         model: pyNastran BDF model
         axis: Cylinder axis ('X', 'Y', or 'Z')
         center: Center of cylinder in the radial plane (r1_center, r2_center)
+        eligible_nids: If provided, only consider these node IDs for radius detection
         
     Returns:
         Detected cylinder radius
@@ -154,7 +199,9 @@ def detect_cylinder_radius(model: BDF, axis: str, center: Tuple[float, float]) -
     ax_idx, r1_idx, r2_idx = get_radial_components(axis)
     
     radii = []
-    for node in model.nodes.values():
+    for nid, node in model.nodes.items():
+        if eligible_nids is not None and nid not in eligible_nids:
+            continue
         pos = node.get_position()
         r1 = pos[r1_idx] - center[0]
         r2 = pos[r2_idx] - center[1]
@@ -180,6 +227,7 @@ def fix_oml(
     center: Tuple[float, float] = (0.0, 0.0),
     tolerance_pct: float = 5.0,
     nid_filter: Optional[List[int]] = None,
+    pid_filter: Optional[List[int]] = None,
     punch: bool = False,
     verbose: bool = False,
 ) -> Dict:
@@ -194,6 +242,8 @@ def fix_oml(
         center: Cylinder center in the radial plane
         tolerance_pct: Percentage of radius used as tolerance band
         nid_filter: Optional list of specific node IDs to fix
+        pid_filter: Optional list of property IDs - only nodes on elements
+                    with these PIDs will be fixed
         punch: Whether to read BDF in punch mode
         verbose: Enable verbose logging
         
@@ -224,7 +274,29 @@ def fix_oml(
     model.read_bdf(input_file, xref=True, punch=punch)
     
     total_nodes = len(model.nodes)
+    total_elements = len(model.elements)
     logger.info(f"Total nodes: {total_nodes}")
+    logger.info(f"Total elements: {total_elements}")
+    
+    # Build eligible node set from PID filter
+    eligible_nids = None
+    if pid_filter:
+        eligible_nids = get_nodes_for_pids(model, pid_filter)
+        if not eligible_nids:
+            logger.error("No nodes found for specified PIDs! Check your PID values.")
+            return {'total_nodes': total_nodes, 'nodes_fixed': 0}
+    
+    # Merge with explicit NID filter
+    if nid_filter is not None:
+        nid_set = set(nid_filter)
+        if eligible_nids is not None:
+            # Intersection: node must be in both PID-derived set and explicit NID list
+            eligible_nids = eligible_nids & nid_set
+        else:
+            eligible_nids = nid_set
+    
+    if eligible_nids is not None:
+        logger.info(f"Eligible nodes (after PID + NID filtering): {len(eligible_nids)}")
     
     # Detect or use specified axis
     if axis is None:
@@ -238,9 +310,9 @@ def fix_oml(
                 f"radial plane={axis_names[r1_idx]},{axis_names[r2_idx]})")
     logger.info(f"Cylinder center in radial plane: ({center[0]}, {center[1]})")
     
-    # Detect or use specified radius
+    # Detect or use specified radius (only from eligible nodes if PID-filtered)
     if target_radius is None:
-        target_radius = detect_cylinder_radius(model, axis, center)
+        target_radius = detect_cylinder_radius(model, axis, center, eligible_nids)
         logger.info(f"Auto-detected target radius: {target_radius:.4f}")
     else:
         logger.info(f"Using specified target radius: {target_radius:.4f}")
@@ -255,11 +327,13 @@ def fix_oml(
     # Process each node
     stats = {
         'total_nodes': total_nodes,
+        'total_elements': total_elements,
+        'eligible_nodes': len(eligible_nids) if eligible_nids else total_nodes,
         'nodes_in_band': 0,
         'nodes_fixed': 0,
         'nodes_skipped_already_correct': 0,
         'nodes_skipped_outside_band': 0,
-        'nodes_skipped_filter': 0,
+        'nodes_skipped_not_eligible': 0,
         'max_radial_correction': 0.0,
         'avg_radial_correction': 0.0,
     }
@@ -267,6 +341,11 @@ def fix_oml(
     corrections = []
     
     for nid, node in model.nodes.items():
+        # Check eligibility (PID + NID filter)
+        if eligible_nids is not None and nid not in eligible_nids:
+            stats['nodes_skipped_not_eligible'] += 1
+            continue
+        
         # Get global position
         pos_global = node.get_position()
         
@@ -281,11 +360,6 @@ def fix_oml(
             continue
         
         stats['nodes_in_band'] += 1
-        
-        # Check NID filter
-        if nid_filter is not None and nid not in nid_filter:
-            stats['nodes_skipped_filter'] += 1
-            continue
         
         # Check if already at target radius
         if abs(current_r - target_radius) < 1e-6:
@@ -361,13 +435,17 @@ def fix_oml(
     logger.info("=" * 50)
     logger.info("OML FIX SUMMARY")
     logger.info("=" * 50)
-    logger.info(f"Total nodes: {stats['total_nodes']}")
+    logger.info(f"Total nodes in model: {stats['total_nodes']}")
+    logger.info(f"Total elements in model: {stats['total_elements']}")
+    if pid_filter:
+        logger.info(f"PIDs selected: {pid_filter}")
+    logger.info(f"Eligible nodes: {stats['eligible_nodes']}")
     logger.info(f"Nodes in tolerance band: {stats['nodes_in_band']}")
     logger.info(f"Nodes fixed: {stats['nodes_fixed']}")
     logger.info(f"Nodes already correct: {stats['nodes_skipped_already_correct']}")
-    logger.info(f"Nodes outside band: {stats['nodes_skipped_outside_band']}")
-    if nid_filter:
-        logger.info(f"Nodes filtered out: {stats['nodes_skipped_filter']}")
+    logger.info(f"Nodes outside tolerance band: {stats['nodes_skipped_outside_band']}")
+    if eligible_nids is not None:
+        logger.info(f"Nodes not eligible (wrong PID/NID): {stats['nodes_skipped_not_eligible']}")
     if corrections:
         logger.info(f"Max radial correction: {stats['max_radial_correction']:.4f}")
         logger.info(f"Avg radial correction: {stats['avg_radial_correction']:.4f}")
@@ -392,11 +470,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python fix_oml.py --in refined.bdf --out fixed.bdf
-  python fix_oml.py --in refined.bdf --out fixed.bdf --radius 165.25
-  python fix_oml.py --in refined.bdf --out fixed.bdf --axis X --center 0,0
-  python fix_oml.py --in refined.bdf --out fixed.bdf --tolerance 3.0
   python fix_oml.py --in refined.bdf --out fixed.bdf --punch
+  python fix_oml.py --in refined.bdf --out fixed.bdf --pids 100,101,102 --punch
+  python fix_oml.py --in refined.bdf --out fixed.bdf --pids 100 --radius 165.25
+  python fix_oml.py --in refined.bdf --out fixed.bdf --axis X --center 0,0
+  python fix_oml.py --in refined.bdf --out fixed.bdf --pids 100 --tolerance 3.0
 """
     )
     
@@ -413,6 +491,9 @@ Examples:
                         help='Cylinder center in radial plane, format: val1,val2 (default: 0,0)')
     parser.add_argument('--tolerance', '-t', type=float, default=5.0,
                         help='Tolerance as %% of radius for node selection (default: 5.0)')
+    parser.add_argument('--pids', '-p', type=str, default=None,
+                        help='Comma-separated list of property IDs - only fix nodes '
+                             'belonging to elements with these PIDs')
     parser.add_argument('--nids', type=str, default=None,
                         help='Comma-separated list of node IDs to fix (optional)')
     parser.add_argument('--punch', action='store_true',
@@ -429,6 +510,15 @@ Examples:
     except (ValueError, IndexError):
         print(f"ERROR: Invalid center format '{args.center}'. Use: val1,val2")
         sys.exit(1)
+    
+    # Parse PID filter
+    pid_filter = None
+    if args.pids:
+        try:
+            pid_filter = [int(p.strip()) for p in args.pids.split(',')]
+        except ValueError:
+            print(f"ERROR: Invalid pids format '{args.pids}'. Use comma-separated integers.")
+            sys.exit(1)
     
     # Parse NID filter
     nid_filter = None
@@ -448,6 +538,7 @@ Examples:
         center=center,
         tolerance_pct=args.tolerance,
         nid_filter=nid_filter,
+        pid_filter=pid_filter,
         punch=args.punch,
         verbose=args.verbose,
     )

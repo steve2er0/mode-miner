@@ -1695,7 +1695,7 @@ def refine_mesh(
         actual_start_nid = start_nid
         # Only warn if the specific starting ID already exists (actual collision)
         if actual_start_nid in existing_nids:
-            logger.warning(f"⚠ start_nid ({actual_start_nid}) already exists in model! "
+            logger.warning(f"[WARN] start_nid ({actual_start_nid}) already exists in model! "
                           f"May cause ID collisions.")
         else:
             logger.info(f"Using user-specified start_nid: {actual_start_nid}")
@@ -1706,7 +1706,7 @@ def refine_mesh(
         actual_start_eid = start_eid
         # Only warn if the specific starting ID already exists (actual collision)
         if actual_start_eid in existing_eids:
-            logger.warning(f"⚠ start_eid ({actual_start_eid}) already exists in model! "
+            logger.warning(f"[WARN] start_eid ({actual_start_eid}) already exists in model! "
                           f"May cause ID collisions.")
         else:
             logger.info(f"Using user-specified start_eid: {actual_start_eid}")
@@ -1787,7 +1787,7 @@ def refine_mesh(
     
     # Check 1: Original nodes preserved
     # (We never delete nodes, only add, so this is guaranteed)
-    logger.info("✓ Original GRID IDs preserved (by design)")
+    logger.info("[OK] Original GRID IDs preserved (by design)")
     
     # Check 2: Element count math
     # For quads: each split removes 1, adds 4 (net +3)
@@ -1798,9 +1798,9 @@ def refine_mesh(
         expected_element_change = total_stats['total_elements_split'] * 3
         actual_element_change = final_elements - initial_elements
         if expected_element_change == actual_element_change:
-            logger.info(f"✓ Element count change matches expected ({actual_element_change})")
+            logger.info(f"[OK] Element count change matches expected ({actual_element_change})")
         else:
-            logger.warning(f"✗ Element count mismatch: expected +{expected_element_change}, got +{actual_element_change}")
+            logger.warning(f"[FAIL] Element count mismatch: expected +{expected_element_change}, got +{actual_element_change}")
     else:
         logger.info(f"  Element count change: +{final_elements - initial_elements} (mixed 1D/2D)")
     
@@ -1824,9 +1824,9 @@ def refine_mesh(
                     violations += 1
     
     if violations == 0:
-        logger.info("✓ All elements meet target edge length")
+        logger.info("[OK] All elements meet target edge length")
     else:
-        logger.warning(f"✗ {violations} elements still exceed target edge length")
+        logger.warning(f"[FAIL] {violations} elements still exceed target edge length")
     
     # Check 4: Mass conservation
     final_mass, final_mass_lbs = calculate_total_mass(model, mass_to_lbs_factor)
@@ -1839,11 +1839,11 @@ def refine_mesh(
     logger.info(f"Difference:   {mass_diff:.6f} ({mass_diff_pct:.4f}%)")
     
     if mass_diff_pct < 0.01:  # Less than 0.01% difference
-        logger.info("✓ Mass preserved (< 0.01% change)")
+        logger.info("[OK] Mass preserved (< 0.01% change)")
     elif mass_diff_pct < 0.1:  # Less than 0.1% difference
-        logger.warning(f"⚠ Small mass change detected ({mass_diff_pct:.4f}%)")
+        logger.warning(f"[WARN] Small mass change detected ({mass_diff_pct:.4f}%)")
     else:
-        logger.error(f"✗ Significant mass change detected ({mass_diff_pct:.4f}%)! Check for errors.")
+        logger.error(f"[FAIL] Significant mass change detected ({mass_diff_pct:.4f}%)! Check for errors.")
     
     # Check for ID overflow (8-character field limit = 99999999)
     MAX_ID = 99999999
@@ -1851,20 +1851,20 @@ def refine_mesh(
     max_eid = max(model.elements.keys()) if model.elements else 0
     
     if max_nid > MAX_ID:
-        logger.error(f"✗ GRID IDs exceed 8-character limit! Max NID: {max_nid}")
+        logger.error(f"[FAIL] GRID IDs exceed 8-character limit! Max NID: {max_nid}")
         logger.error("  Consider starting with a model that has smaller node IDs.")
     elif max_nid > MAX_ID // 10:
-        logger.warning(f"⚠ GRID IDs getting large ({max_nid}). May cause issues with more refinement.")
+        logger.warning(f"[WARN] GRID IDs getting large ({max_nid}). May cause issues with more refinement.")
     else:
-        logger.info(f"✓ GRID IDs within safe range (max: {max_nid})")
+        logger.info(f"[OK] GRID IDs within safe range (max: {max_nid})")
     
     if max_eid > MAX_ID:
-        logger.error(f"✗ Element IDs exceed 8-character limit! Max EID: {max_eid}")
+        logger.error(f"[FAIL] Element IDs exceed 8-character limit! Max EID: {max_eid}")
         logger.error("  Consider starting with a model that has smaller element IDs.")
     elif max_eid > MAX_ID // 10:
-        logger.warning(f"⚠ Element IDs getting large ({max_eid}). May cause issues with more refinement.")
+        logger.warning(f"[WARN] Element IDs getting large ({max_eid}). May cause issues with more refinement.")
     else:
-        logger.info(f"✓ Element IDs within safe range (max: {max_eid})")
+        logger.info(f"[OK] Element IDs within safe range (max: {max_eid})")
     
     # Write output
     logger.info(f"\nWriting refined BDF: {output_file}")
@@ -2003,41 +2003,41 @@ def run_unit_test() -> bool:
             passed = True
             
             if stats['final_nodes'] != 15:
-                print(f"✗ FAIL: Expected 15 nodes, got {stats['final_nodes']}")
+                print(f"[FAIL] FAIL: Expected 15 nodes, got {stats['final_nodes']}")
                 passed = False
             else:
-                print(f"✓ PASS: Node count correct (15)")
+                print(f"[OK] PASS: Node count correct (15)")
             
             if stats['final_elements'] != 8:
-                print(f"✗ FAIL: Expected 8 elements, got {stats['final_elements']}")
+                print(f"[FAIL] FAIL: Expected 8 elements, got {stats['final_elements']}")
                 passed = False
             else:
-                print(f"✓ PASS: Element count correct (8)")
+                print(f"[OK] PASS: Element count correct (8)")
             
             if stats['passes'] != 1:
-                print(f"✗ FAIL: Expected 1 pass, got {stats['passes']}")
+                print(f"[FAIL] FAIL: Expected 1 pass, got {stats['passes']}")
                 passed = False
             else:
-                print(f"✓ PASS: Pass count correct (1)")
+                print(f"[OK] PASS: Pass count correct (1)")
             
             # Verify output file exists and can be read
             model = BDF(debug=False)
             model.read_bdf(output_path, xref=False)
-            print(f"✓ PASS: Output BDF readable by pyNastran")
+            print(f"[OK] PASS: Output BDF readable by pyNastran")
             
             # Check that original node IDs 1-6 still exist
             original_nids = {1, 2, 3, 4, 5, 6}
             if original_nids.issubset(set(model.nodes.keys())):
-                print(f"✓ PASS: Original node IDs preserved")
+                print(f"[OK] PASS: Original node IDs preserved")
             else:
-                print(f"✗ FAIL: Original node IDs not preserved")
+                print(f"[FAIL] FAIL: Original node IDs not preserved")
                 passed = False
             
             print("\n" + ("TEST PASSED" if passed else "TEST FAILED"))
             return passed
             
         except Exception as e:
-            print(f"✗ FAIL: Exception during test: {e}")
+            print(f"[FAIL] FAIL: Exception during test: {e}")
             import traceback
             traceback.print_exc()
             return False

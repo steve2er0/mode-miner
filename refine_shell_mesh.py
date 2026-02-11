@@ -860,9 +860,11 @@ def split_cbar(
         {'nodes': [nm, gb], 'wa': child2_wa, 'wb': child2_wb, 'pa': 0, 'pb': pb},
     ]
     
-    # Determine if we need to recompute X vector for child 2
-    # If GA has a cylindrical CD and the parent's X vector is along the cylindrical axis,
-    # child 2 should use the negative radial direction at GA's position instead
+    # Determine X vector for each child element
+    # When GA has a non-global CD (especially cylindrical), the parent's X vector
+    # is expressed in GA's displacement coordinate system. For child 2 (starting at
+    # the midpoint node which may have a different CD), we need to transform X from
+    # GA's CD to the midpoint node's CD.
     x_child1 = x
     x_child2 = x
     g0_child1 = g0
@@ -872,38 +874,45 @@ def split_cbar(
         ga_node = model.nodes[ga]
         ga_cd = getattr(ga_node, 'cd', 0) or 0
         
-        if ga_cd != 0 and ga_cd in model.coords:
+        nm_node = model.nodes[nm]
+        nm_cd = getattr(nm_node, 'cd', 0) or 0
+        
+        if ga_cd != nm_cd and ga_cd != 0 and ga_cd in model.coords:
             coord = model.coords[ga_cd]
             if coord.type in ('CORD2C', 'CORD1C'):
-                # Get the cylindrical axis direction in global
-                cyl_axis = coord.k  # Unit vector along cylindrical Z axis
-                
-                # Check if parent's X is parallel to cylindrical axis
-                x_vec = np.array(x)
-                dot_product = abs(np.dot(x_vec, cyl_axis))
-                
-                if dot_product > 0.9:  # X is nearly parallel to cylindrical axis
-                    # Recompute X for child 2 as negative radial direction at GA
-                    try:
-                        ga_pos_global = get_grid_xyz(model, ga)
-                        ga_pos_local = coord.transform_node_to_local(ga_pos_global)
-                        theta_rad = np.radians(ga_pos_local[1])
-                        
-                        # Radial direction at this theta
-                        x_axis_global = coord.i  # theta=0 direction
-                        y_axis_global = coord.j  # perpendicular in R-theta plane
-                        
-                        e_r = np.cos(theta_rad) * x_axis_global + np.sin(theta_rad) * y_axis_global
-                        
-                        # Use NEGATIVE radial direction (matches FEMAP behavior)
-                        x_child2 = list(-e_r)
-                        g0_child2 = None  # Clear G0 when using computed X
-                        
-                        logger.debug(f"CBAR {eid}: Recomputing X for child 2 (GA in cylindrical CD={ga_cd})")
-                        logger.debug(f"  Parent X = {x} (parallel to cyl axis {list(cyl_axis)})")
-                        logger.debug(f"  Child 2 X = {x_child2} (negative radial at theta={ga_pos_local[1]:.1f}°)")
-                    except Exception as e:
-                        logger.warning(f"CBAR {eid}: Failed to recompute X for child 2: {e}")
+                # Transform X vector from GA's cylindrical CD to global
+                try:
+                    ga_pos_global = get_grid_xyz(model, ga)
+                    ga_pos_local = coord.transform_node_to_local(ga_pos_global)
+                    theta_rad = np.radians(ga_pos_local[1])
+                    
+                    e_r = np.cos(theta_rad) * coord.i + np.sin(theta_rad) * coord.j
+                    e_theta = -np.sin(theta_rad) * coord.i + np.cos(theta_rad) * coord.j
+                    e_z = coord.k
+                    
+                    x_vec = np.array(x)
+                    x_global = x_vec[0] * e_r + x_vec[1] * e_theta + x_vec[2] * e_z
+                    
+                    x_child2 = transform_offset_from_global(model, nm, x_global)
+                    g0_child2 = None
+                    
+                    logger.debug(f"CBAR {eid}: Transforming X for child 2 (GA CD={ga_cd} -> NM CD={nm_cd})")
+                    logger.debug(f"  Parent X = {x} (in GA's CD={ga_cd} at theta={ga_pos_local[1]:.1f}°)")
+                    logger.debug(f"  Child 2 X = {x_child2} (in NM's CD={nm_cd})")
+                except Exception as e:
+                    logger.warning(f"CBAR {eid}: Failed to transform X for child 2: {e}")
+            
+            elif coord.type in ('CORD2R', 'CORD1R'):
+                try:
+                    beta = coord.beta()
+                    x_global = beta @ np.array(x)
+                    x_child2 = transform_offset_from_global(model, nm, x_global)
+                    g0_child2 = None
+                    
+                    logger.debug(f"CBAR {eid}: Transforming X for child 2 (GA CD={ga_cd} rect -> NM CD={nm_cd})")
+                    logger.debug(f"  Parent X = {x}, Child 2 X = {x_child2}")
+                except Exception as e:
+                    logger.warning(f"CBAR {eid}: Failed to transform X for child 2: {e}")
     
     # Create 2 child bars
     for i, cd in enumerate(child_data):
@@ -1124,9 +1133,11 @@ def split_cbeam(
         {'nodes': [nm, gb], 'wa': child2_wa, 'wb': child2_wb, 'pa': 0, 'pb': pb, 'sa': 0, 'sb': sb},
     ]
     
-    # Determine if we need to recompute X vector for child 2
-    # If GA has a cylindrical CD and the parent's X vector is along the cylindrical axis,
-    # child 2 should use the negative radial direction at GA's position instead
+    # Determine X vector for each child element
+    # When GA has a non-global CD (especially cylindrical), the parent's X vector
+    # is expressed in GA's displacement coordinate system. For child 2 (starting at
+    # the midpoint node which has CD=0), we need to transform X from GA's CD to global.
+    # Child 1 keeps GA as its start node so the original X stays valid.
     x_child1 = x
     x_child2 = x
     g0_child1 = g0
@@ -1136,38 +1147,51 @@ def split_cbeam(
         ga_node = model.nodes[ga]
         ga_cd = getattr(ga_node, 'cd', 0) or 0
         
-        if ga_cd != 0 and ga_cd in model.coords:
+        # Check if the midpoint node has a different CD than GA
+        nm_node = model.nodes[nm]
+        nm_cd = getattr(nm_node, 'cd', 0) or 0
+        
+        if ga_cd != nm_cd and ga_cd != 0 and ga_cd in model.coords:
             coord = model.coords[ga_cd]
             if coord.type in ('CORD2C', 'CORD1C'):
-                # Get the cylindrical axis direction in global
-                cyl_axis = coord.k  # Unit vector along cylindrical Z axis
-                
-                # Check if parent's X is parallel to cylindrical axis
-                x_vec = np.array(x)
-                dot_product = abs(np.dot(x_vec, cyl_axis))
-                
-                if dot_product > 0.9:  # X is nearly parallel to cylindrical axis
-                    # Recompute X for child 2 as negative radial direction at GA
-                    try:
-                        ga_pos_global = get_grid_xyz(model, ga)
-                        ga_pos_local = coord.transform_node_to_local(ga_pos_global)
-                        theta_rad = np.radians(ga_pos_local[1])
-                        
-                        # Radial direction at this theta
-                        x_axis_global = coord.i  # theta=0 direction
-                        y_axis_global = coord.j  # perpendicular in R-theta plane
-                        
-                        e_r = np.cos(theta_rad) * x_axis_global + np.sin(theta_rad) * y_axis_global
-                        
-                        # Use NEGATIVE radial direction (matches FEMAP behavior)
-                        x_child2 = list(-e_r)
-                        g0_child2 = None  # Clear G0 when using computed X
-                        
-                        logger.debug(f"CBEAM {eid}: Recomputing X for child 2 (GA in cylindrical CD={ga_cd})")
-                        logger.debug(f"  Parent X = {x} (parallel to cyl axis {list(cyl_axis)})")
-                        logger.debug(f"  Child 2 X = {x_child2} (negative radial at theta={ga_pos_local[1]:.1f}°)")
-                    except Exception as e:
-                        logger.warning(f"CBEAM {eid}: Failed to recompute X for child 2: {e}")
+                # Transform X vector from GA's cylindrical CD to global
+                # X = [x1, x2, x3] where x1=radial, x2=tangential, x3=axial components
+                try:
+                    ga_pos_global = get_grid_xyz(model, ga)
+                    ga_pos_local = coord.transform_node_to_local(ga_pos_global)
+                    theta_rad = np.radians(ga_pos_local[1])
+                    
+                    # Unit vectors at GA's theta in global
+                    e_r = np.cos(theta_rad) * coord.i + np.sin(theta_rad) * coord.j
+                    e_theta = -np.sin(theta_rad) * coord.i + np.cos(theta_rad) * coord.j
+                    e_z = coord.k
+                    
+                    # Transform X from GA's CD to global
+                    x_vec = np.array(x)
+                    x_global = x_vec[0] * e_r + x_vec[1] * e_theta + x_vec[2] * e_z
+                    
+                    # Transform to midpoint node's CD (if CD=0, it stays global)
+                    x_child2 = transform_offset_from_global(model, nm, x_global)
+                    g0_child2 = None  # Use X vector, not G0
+                    
+                    logger.debug(f"CBEAM {eid}: Transforming X for child 2 (GA CD={ga_cd} -> NM CD={nm_cd})")
+                    logger.debug(f"  Parent X = {x} (in GA's CD={ga_cd} at theta={ga_pos_local[1]:.1f}°)")
+                    logger.debug(f"  Child 2 X = {x_child2} (in NM's CD={nm_cd})")
+                except Exception as e:
+                    logger.warning(f"CBEAM {eid}: Failed to transform X for child 2: {e}")
+            
+            elif coord.type in ('CORD2R', 'CORD1R'):
+                # Transform X vector from GA's rectangular CD to global
+                try:
+                    beta = coord.beta()
+                    x_global = beta @ np.array(x)
+                    x_child2 = transform_offset_from_global(model, nm, x_global)
+                    g0_child2 = None
+                    
+                    logger.debug(f"CBEAM {eid}: Transforming X for child 2 (GA CD={ga_cd} rect -> NM CD={nm_cd})")
+                    logger.debug(f"  Parent X = {x}, Child 2 X = {x_child2}")
+                except Exception as e:
+                    logger.warning(f"CBEAM {eid}: Failed to transform X for child 2: {e}")
     
     # Create 2 child beams
     for i, cd in enumerate(child_data):

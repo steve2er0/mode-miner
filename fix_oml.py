@@ -378,38 +378,79 @@ def fix_oml(
             continue
         beam_axis = beam_axis / beam_len
         
-        # Get the X vector (orientation vector)
-        x_vec = None
+        # Get the X vector (orientation vector) in GLOBAL coordinates
+        # The X vector may be stored in GA's displacement coordinate system (CD),
+        # so we need to transform it to global for computing the physical y-axis.
+        x_vec_global = None
         g0 = getattr(elem, 'g0', None)
         if g0 is not None:
-            # G0 is a node ID - compute direction from GA to G0
+            # G0 is a node ID - direction from GA to G0 is already in global
             if hasattr(g0, 'nid'):
                 g0_nid = g0.nid
             else:
                 g0_nid = g0
             if g0_nid in old_positions:
                 g0_pos = old_positions[g0_nid]
-                x_vec = g0_pos - ga_pos
+                x_vec_global = g0_pos - ga_pos
         else:
             x_raw = getattr(elem, 'x', None)
             if x_raw is not None:
                 if hasattr(x_raw, 'tolist'):
-                    x_vec = x_raw.copy()
+                    x_local = np.array(x_raw.tolist(), dtype=float)
+                elif isinstance(x_raw, (list, tuple)):
+                    x_local = np.array(x_raw, dtype=float)
                 else:
-                    x_vec = np.array(x_raw, dtype=float)
+                    x_local = np.array(x_raw, dtype=float)
+                
+                # Transform X from GA's CD to global if GA has a non-zero CD
+                ga_node = model.nodes[ga]
+                ga_cd = getattr(ga_node, 'cd', 0)
+                if hasattr(ga_cd, 'cid'):
+                    ga_cd = ga_cd.cid
+                if ga_cd is None:
+                    ga_cd = 0
+                
+                if ga_cd != 0 and ga_cd in model.coords:
+                    coord = model.coords[ga_cd]
+                    if coord.type in ('CORD2C', 'CORD1C'):
+                        # X is in cylindrical CD: [r_comp, theta_comp, z_comp]
+                        try:
+                            ga_pos_local = coord.transform_node_to_local(ga_pos)
+                            theta_rad = np.radians(ga_pos_local[1])
+                            
+                            e_r = np.cos(theta_rad) * coord.i + np.sin(theta_rad) * coord.j
+                            e_theta = -np.sin(theta_rad) * coord.i + np.cos(theta_rad) * coord.j
+                            e_z = coord.k
+                            
+                            x_vec_global = (x_local[0] * e_r +
+                                          x_local[1] * e_theta +
+                                          x_local[2] * e_z)
+                        except Exception:
+                            x_vec_global = x_local
+                    elif coord.type in ('CORD2R', 'CORD1R'):
+                        try:
+                            beta = coord.beta()
+                            x_vec_global = beta @ x_local
+                        except Exception:
+                            x_vec_global = x_local
+                    else:
+                        x_vec_global = x_local
+                else:
+                    # CD=0: X is already in global
+                    x_vec_global = x_local
         
-        if x_vec is None:
+        if x_vec_global is None:
             continue
         
-        # Compute beam y-axis: y = normalize(X - (X.dot(axis)) * axis)
-        x_proj = x_vec - np.dot(x_vec, beam_axis) * beam_axis
+        # Compute beam y-axis: y = normalize(X_global - (X_global.dot(axis)) * axis)
+        x_proj = x_vec_global - np.dot(x_vec_global, beam_axis) * beam_axis
         x_proj_len = np.linalg.norm(x_proj)
         if x_proj_len < 1e-10:
             continue
         y_axis = x_proj / x_proj_len
         
         beam_orientations[eid] = y_axis
-        logger.debug(f"  1D elem {eid}: saved y-axis = {[round(v,6) for v in y_axis]}")
+        logger.debug(f"  1D elem {eid}: saved y-axis (global) = {[round(v,6) for v in y_axis]}")
     
     if beam_orientations:
         logger.info(f"Saved orientation for {len(beam_orientations)} 1D elements")
@@ -555,15 +596,55 @@ def fix_oml(
                 continue
             new_y_axis = y_proj / y_proj_len
             
-            # The X vector just needs to not be parallel to the beam axis
-            # and to produce the correct y-axis. The y-axis IS a valid X vector.
-            new_x = list(new_y_axis)
+            # The y-axis is a valid X vector (in global coordinates).
+            # But we need to express it in GA's CD, since that's how the
+            # original X vector was defined.
+            x_global = new_y_axis
+            
+            ga_node = model.nodes[ga]
+            ga_cd = getattr(ga_node, 'cd', 0)
+            if hasattr(ga_cd, 'cid'):
+                ga_cd = ga_cd.cid
+            if ga_cd is None:
+                ga_cd = 0
+            
+            if ga_cd != 0 and ga_cd in model.coords:
+                coord = model.coords[ga_cd]
+                if coord.type in ('CORD2C', 'CORD1C'):
+                    # Transform global X to GA's cylindrical CD
+                    try:
+                        ga_pos_local = coord.transform_node_to_local(ga_pos_new)
+                        theta_rad = np.radians(ga_pos_local[1])
+                        
+                        e_r = np.cos(theta_rad) * coord.i + np.sin(theta_rad) * coord.j
+                        e_theta = -np.sin(theta_rad) * coord.i + np.cos(theta_rad) * coord.j
+                        e_z = coord.k
+                        
+                        # Project global vector onto local directions
+                        new_x = [
+                            float(np.dot(x_global, e_r)),
+                            float(np.dot(x_global, e_theta)),
+                            float(np.dot(x_global, e_z)),
+                        ]
+                    except Exception:
+                        new_x = list(x_global)
+                elif coord.type in ('CORD2R', 'CORD1R'):
+                    try:
+                        beta = coord.beta()
+                        new_x = list(beta.T @ x_global)
+                    except Exception:
+                        new_x = list(x_global)
+                else:
+                    new_x = list(x_global)
+            else:
+                new_x = list(x_global)
             
             # Update the element: set X vector, clear G0
             elem.g0 = None
             elem.x = np.array(new_x, dtype=float)
             
-            logger.debug(f"  1D elem {eid}: X updated to {[round(v,6) for v in new_x]}")
+            logger.debug(f"  1D elem {eid}: X updated to {[round(v,6) for v in new_x]} "
+                        f"(GA CD={ga_cd})")
             stats['orientations_fixed'] += 1
         
         logger.info(f"1D element orientations fixed: {stats['orientations_fixed']}")

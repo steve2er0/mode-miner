@@ -13,9 +13,14 @@ OPTIONS:
     --in, -i          Input BDF file path (required)
     --out, -o         Output BDF file path (required)
     --target, -t      Target maximum edge length (required)
+    --min-edge        Minimum edge length - skip splitting if children would be
+                      smaller than this value (default: 0 = no limit)
     --max-passes, -m  Maximum refinement passes (default: 10)
     --pids, -p        Comma-separated list of property IDs to refine (optional)
     --eid-range, -e   Element ID range to refine, format: START:END (optional)
+    --start-nid       Starting node ID for new nodes (default: max existing + 1)
+    --start-eid       Starting element ID for new elements (default: max existing + 1)
+    --mass-factor     Mass conversion factor to lbs (default: 396.4)
     --verbose, -v     Enable verbose logging
 
 DEPENDENCIES:

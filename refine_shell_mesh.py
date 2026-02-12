@@ -1304,7 +1304,8 @@ def run_refinement_pass(
     id_alloc: IdAllocator,
     pid_filter: Optional[Set[int]] = None,
     eid_range: Optional[Tuple[int, int]] = None,
-    logger: Optional[logging.Logger] = None
+    logger: Optional[logging.Logger] = None,
+    min_edge_length: float = 0.0
 ) -> RefinementStats:
     """
     Execute one refinement pass over the model.
@@ -1317,6 +1318,7 @@ def run_refinement_pass(
         pid_filter: Optional set of PIDs to refine
         eid_range: Optional (min, max) element ID range
         logger: Optional logger for verbose output
+        min_edge_length: Minimum edge length - don't split elements smaller than this
         
     Returns:
         Statistics for this pass
@@ -1333,6 +1335,7 @@ def run_refinement_pass(
     
     # Track edge lengths for diagnostics
     all_edge_lengths = []
+    skipped_too_small = 0
     
     # IMPORTANT: Process 2D elements FIRST, then 1D elements
     # This ensures that when 1D elements share edges with 2D elements,
@@ -1351,6 +1354,10 @@ def run_refinement_pass(
             max_edge = compute_max_edge_length_quad(model, list(elem.nodes))
             all_edge_lengths.append(max_edge)
             if max_edge > target_edge_length:
+                # Check minimum edge length - don't split if children would be too small
+                if min_edge_length > 0 and max_edge / 2.0 < min_edge_length:
+                    skipped_too_small += 1
+                    continue
                 split_cquad4(model, elem, edge_cache, id_alloc, stats,
                            elements_to_remove, new_elements)
         
@@ -1362,6 +1369,10 @@ def run_refinement_pass(
             max_edge = compute_max_edge_length_tri(model, list(elem.nodes))
             all_edge_lengths.append(max_edge)
             if max_edge > target_edge_length:
+                # Check minimum edge length - don't split if children would be too small
+                if min_edge_length > 0 and max_edge / 2.0 < min_edge_length:
+                    skipped_too_small += 1
+                    continue
                 split_ctria3(model, elem, edge_cache, id_alloc, stats,
                            elements_to_remove, new_elements)
     
@@ -1425,6 +1436,9 @@ def run_refinement_pass(
                 bar_length = compute_bar_length(model, [ga, gb])
                 all_edge_lengths.append(bar_length)
                 if bar_length > target_edge_length:
+                    if min_edge_length > 0 and bar_length / 2.0 < min_edge_length:
+                        skipped_too_small += 1
+                        continue
                     split_cbar(model, elem, edge_cache, id_alloc, stats,
                               elements_to_remove, new_elements)
         
@@ -1442,6 +1456,9 @@ def run_refinement_pass(
                 beam_length = compute_bar_length(model, [ga, gb])
                 all_edge_lengths.append(beam_length)
                 if beam_length > target_edge_length:
+                    if min_edge_length > 0 and beam_length / 2.0 < min_edge_length:
+                        skipped_too_small += 1
+                        continue
                     split_cbeam(model, elem, edge_cache, id_alloc, stats,
                                elements_to_remove, new_elements)
         
@@ -1459,6 +1476,9 @@ def run_refinement_pass(
                 rod_length = compute_bar_length(model, [ga, gb])
                 all_edge_lengths.append(rod_length)
                 if rod_length > target_edge_length:
+                    if min_edge_length > 0 and rod_length / 2.0 < min_edge_length:
+                        skipped_too_small += 1
+                        continue
                     split_crod(model, elem, edge_cache, id_alloc, stats,
                               elements_to_remove, new_elements)
     
@@ -1469,6 +1489,8 @@ def run_refinement_pass(
         avg_len = sum(all_edge_lengths) / len(all_edge_lengths)
         logger.info(f"  Edge lengths: min={min_len:.4f}, max={max_len:.4f}, avg={avg_len:.4f}")
         logger.info(f"  Target: {target_edge_length}, Elements exceeding: {stats.elements_split}")
+        if min_edge_length > 0:
+            logger.info(f"  Min edge: {min_edge_length}, Skipped (too small): {skipped_too_small}")
     
     # Remove original elements
     for eid in elements_to_remove:
@@ -1607,6 +1629,7 @@ def refine_mesh(
     start_nid: Optional[int] = None,
     start_eid: Optional[int] = None,
     mass_to_lbs_factor: float = 396.4,
+    min_edge_length: float = 0.0,
     verbose: bool = False
 ) -> Dict:
     """
@@ -1622,6 +1645,7 @@ def refine_mesh(
         start_nid: Optional starting node ID for new nodes (default: max+1)
         start_eid: Optional starting element ID for new elements (default: max+1)
         mass_to_lbs_factor: Conversion factor from model mass units to lbs (default: 396.4)
+        min_edge_length: Minimum edge length - don't split if children would be smaller (default: 0 = no limit)
         verbose: Enable verbose logging
         
     Returns:
@@ -1677,6 +1701,8 @@ def refine_mesh(
     logger.info(f"Initial mass: {initial_mass:.6f} (model units) = {initial_mass_lbs:.2f} lbs")
     
     logger.info(f"Target edge length: {target_edge_length}")
+    if min_edge_length > 0:
+        logger.info(f"Minimum edge length: {min_edge_length}")
     logger.info(f"Max passes: {max_passes}")
     
     if pids:
@@ -1744,7 +1770,8 @@ def refine_mesh(
             id_alloc=id_alloc,
             pid_filter=pid_filter,
             eid_range=eid_range,
-            logger=logger
+            logger=logger,
+            min_edge_length=min_edge_length
         )
         
         if stats.elements_split == 0:
@@ -2078,6 +2105,8 @@ Examples:
                         help='Starting node ID for new nodes (default: max_existing + 1)')
     parser.add_argument('--start-eid', type=int,
                         help='Starting element ID for new elements (default: max_existing + 1)')
+    parser.add_argument('--min-edge', type=float, default=0.0,
+                        help='Minimum edge length - skip splitting if children would be smaller (default: 0 = no limit)')
     parser.add_argument('--mass-factor', type=float, default=396.4,
                         help='Mass conversion factor to lbs (default: 396.4)')
     parser.add_argument('--verbose', '-v', action='store_true',
@@ -2116,6 +2145,7 @@ Examples:
             start_nid=args.start_nid,
             start_eid=args.start_eid,
             mass_to_lbs_factor=args.mass_factor,
+            min_edge_length=args.min_edge,
             verbose=args.verbose
         )
     except FileNotFoundError as e:

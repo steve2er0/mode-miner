@@ -20,6 +20,7 @@ import os
 # ---- Configuration ----
 TARGET_EDGE_LENGTH = 3.0
 MAX_PASSES = 4
+MIN_EDGE_LENGTH = 0.5  # Don't split elements smaller than this
 
 BARREL_PIDS = [
     621001, 621002, 621003, 621004, 621005, 621006, 621007, 621008,
@@ -88,12 +89,14 @@ def main():
             "STEP 2/5: Fix dome OML (coarse)")
 
     # Step 3: Refine mesh
-    print(f"\n*** STEP 3/5: Refine mesh (target={TARGET_EDGE_LENGTH}, max_passes={MAX_PASSES}) ***")
+    print(f"\n*** STEP 3/5: Refine mesh (target={TARGET_EDGE_LENGTH}, "
+          f"min_edge={MIN_EDGE_LENGTH}, max_passes={MAX_PASSES}) ***")
     run([
         sys.executable, refine_script,
         "--in", step2,
         "--out", step3,
         "--target", str(TARGET_EDGE_LENGTH),
+        "--min-edge", str(MIN_EDGE_LENGTH),
         "--max-passes", str(MAX_PASSES),
     ])
 

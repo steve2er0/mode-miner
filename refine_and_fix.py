@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-refine_and_fix.py - Refine LOX tank mesh and fix OML in one shot.
+refine_and_fix.py - Fix OML, refine mesh, then fix OML again.
 
-1. Refine mesh to target edge length of 3, max 4 passes
-2. Fix barrel OML (PIDs 621001-621020)
-3. Fix dome OML (PIDs 620002-620015)
+Pipeline:
+1. Fix barrel OML on coarse mesh (so refinement midpoints land on the circle)
+2. Fix dome OML on coarse mesh
+3. Refine mesh to target edge length
+4. Fix barrel OML again (clean up new midpoints)
+5. Fix dome OML again
 
 Usage:
     python refine_and_fix.py input.bdf output.bdf
@@ -30,6 +33,7 @@ DOME_PIDS = [
 ]
 # ------------------------
 
+
 def run(cmd):
     """Run a command and exit on failure."""
     print(f"\n{'='*60}")
@@ -39,6 +43,18 @@ def run(cmd):
     if result.returncode != 0:
         print(f"\nERROR: Command failed with exit code {result.returncode}")
         sys.exit(result.returncode)
+
+
+def fix_oml(script, input_file, output_file, pids, label):
+    """Run fix_oml.py with given PIDs."""
+    print(f"\n*** {label} ***")
+    pids_str = ",".join(str(p) for p in pids)
+    run([
+        sys.executable, script,
+        "--in", input_file,
+        "--out", output_file,
+        "--pids", pids_str,
+    ])
 
 
 def main():
@@ -58,42 +74,40 @@ def main():
     fix_oml_script = os.path.join(script_dir, "fix_oml.py")
 
     base, ext = os.path.splitext(output_file)
-    refined_file = f"{base}_refined{ext}"
-    barrel_fixed_file = f"{base}_barrel_fixed{ext}"
+    step1 = f"{base}_step1_barrel{ext}"
+    step2 = f"{base}_step2_domes{ext}"
+    step3 = f"{base}_step3_refined{ext}"
+    step4 = f"{base}_step4_barrel{ext}"
 
-    # Step 1: Refine mesh
-    print("\n*** STEP 1: Refine mesh ***")
+    # Step 1: Fix barrel OML on coarse mesh
+    fix_oml(fix_oml_script, input_file, step1, BARREL_PIDS,
+            "STEP 1/5: Fix barrel OML (coarse)")
+
+    # Step 2: Fix dome OML on coarse mesh
+    fix_oml(fix_oml_script, step1, step2, DOME_PIDS,
+            "STEP 2/5: Fix dome OML (coarse)")
+
+    # Step 3: Refine mesh
+    print(f"\n*** STEP 3/5: Refine mesh (target={TARGET_EDGE_LENGTH}, max_passes={MAX_PASSES}) ***")
     run([
         sys.executable, refine_script,
-        "--in", input_file,
-        "--out", refined_file,
+        "--in", step2,
+        "--out", step3,
         "--target", str(TARGET_EDGE_LENGTH),
         "--max-passes", str(MAX_PASSES),
     ])
 
-    # Step 2: Fix barrel OML
-    print("\n*** STEP 2: Fix barrel OML ***")
-    barrel_pids_str = ",".join(str(p) for p in BARREL_PIDS)
-    run([
-        sys.executable, fix_oml_script,
-        "--in", refined_file,
-        "--out", barrel_fixed_file,
-        "--pids", barrel_pids_str,
-    ])
+    # Step 4: Fix barrel OML on refined mesh
+    fix_oml(fix_oml_script, step3, step4, BARREL_PIDS,
+            "STEP 4/5: Fix barrel OML (refined)")
 
-    # Step 3: Fix dome OML
-    print("\n*** STEP 3: Fix dome OML ***")
-    dome_pids_str = ",".join(str(p) for p in DOME_PIDS)
-    run([
-        sys.executable, fix_oml_script,
-        "--in", barrel_fixed_file,
-        "--out", output_file,
-        "--pids", dome_pids_str,
-    ])
+    # Step 5: Fix dome OML on refined mesh
+    fix_oml(fix_oml_script, step4, output_file, DOME_PIDS,
+            "STEP 5/5: Fix dome OML (refined)")
 
     # Clean up intermediate files
     print(f"\nCleaning up intermediate files...")
-    for f in [refined_file, barrel_fixed_file]:
+    for f in [step1, step2, step3, step4]:
         if os.path.isfile(f):
             os.remove(f)
             print(f"  Removed {f}")

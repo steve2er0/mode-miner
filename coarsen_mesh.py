@@ -99,16 +99,54 @@ def build_protected_nodes(
 
     # --- Rigid elements ---
     for eid, elem in model.rigid_elements.items():
-        node_ids = getattr(elem, 'node_ids', [])
-        if not node_ids:
-            node_ids = getattr(elem, 'nodes', [])
-        for n in node_ids:
-            if isinstance(n, int):
-                protected.add(n)
-            elif isinstance(n, list):
-                for nn in n:
-                    if isinstance(nn, int):
-                        protected.add(nn)
+        # Collect all node references from rigid elements.
+        # pyNastran RBE3.node_ids / .nodes can be empty, so we must
+        # explicitly check gn, Gmi (RBE2) and refgrid, Gijs (RBE3).
+        rigid_nodes: Set[int] = set()
+
+        # Generic attributes
+        for attr in ('node_ids', 'nodes'):
+            val = getattr(elem, attr, [])
+            if val:
+                for n in val:
+                    if isinstance(n, int):
+                        rigid_nodes.add(n)
+                    elif isinstance(n, list):
+                        for nn in n:
+                            if isinstance(nn, int):
+                                rigid_nodes.add(nn)
+
+        # RBE2: independent node (gn) and dependent nodes (Gmi)
+        gn = getattr(elem, 'gn', None)
+        if isinstance(gn, int):
+            rigid_nodes.add(gn)
+        gmi = getattr(elem, 'Gmi', [])
+        if gmi:
+            for n in gmi:
+                if isinstance(n, int):
+                    rigid_nodes.add(n)
+
+        # RBE3: reference grid (refgrid) and weighted nodes (Gijs)
+        refgrid = getattr(elem, 'refgrid', None)
+        if isinstance(refgrid, int):
+            rigid_nodes.add(refgrid)
+        gijs = getattr(elem, 'Gijs', [])
+        if gijs:
+            for g in gijs:
+                if isinstance(g, int):
+                    rigid_nodes.add(g)
+                elif isinstance(g, list):
+                    for n in g:
+                        if isinstance(n, int):
+                            rigid_nodes.add(n)
+
+        # RBAR / RROD: nodes attribute
+        for attr in ('ga', 'gb'):
+            val = getattr(elem, attr, None)
+            if isinstance(val, int):
+                rigid_nodes.add(val)
+
+        protected |= rigid_nodes
 
     # --- Mass elements ---
     for eid, elem in model.masses.items():
@@ -608,6 +646,40 @@ def collapse_edge(
     # Remove the collapsed edge
     collapsed_edge = (min(n_remove, n_keep), max(n_remove, n_keep))
     edge_to_elems.pop(collapsed_edge, None)
+
+    # Safety net: update rigid element references (RBE2, RBE3, RBAR, etc.)
+    # so that no rigid element points to the removed node.
+    for rbe_eid, rbe_elem in model.rigid_elements.items():
+        _replace_node_in_rigid(rbe_elem, n_remove, n_keep)
+
+    # Safety net: update mass element references
+    for mass_eid, mass_elem in model.masses.items():
+        mass_nodes = getattr(mass_elem, 'nodes',
+                             getattr(mass_elem, 'node_ids', []))
+        if mass_nodes:
+            for i in range(len(mass_nodes)):
+                if mass_nodes[i] == n_remove:
+                    mass_nodes[i] = n_keep
+
+    # Safety net: update SPC references
+    for spc_id, spc_list in model.spcs.items():
+        for spc in spc_list:
+            spc_nodes = getattr(spc, 'node_ids',
+                                getattr(spc, 'nodes', []))
+            if spc_nodes:
+                for i in range(len(spc_nodes)):
+                    if spc_nodes[i] == n_remove:
+                        spc_nodes[i] = n_keep
+
+    # Safety net: update MPC references
+    for mpc_id, mpc_list in model.mpcs.items():
+        for mpc in mpc_list:
+            mpc_nodes = getattr(mpc, 'node_ids',
+                                getattr(mpc, 'nodes', []))
+            if mpc_nodes:
+                for i in range(len(mpc_nodes)):
+                    if mpc_nodes[i] == n_remove:
+                        mpc_nodes[i] = n_keep
 
     # Remove node from model and position cache
     if n_remove in model.nodes:

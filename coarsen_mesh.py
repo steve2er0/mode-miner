@@ -20,6 +20,10 @@ OPTIONS:
     --fill-holes      Detect and collapse interior holes, removing RBE wagon wheels
     --max-iterations  Max collapse iterations (default: unlimited)
     --min-quality     Minimum element quality to allow collapse (default: 0.1)
+    --max-normal-dev  Max element normal deviation from original surface in degrees
+                      (default: 15). Prevents OML shape distortion on curved regions.
+    --max-chord-dev   Max centroid departure from original surface (default: auto,
+                      target-min / 3). Prevents chord shortcutting across curves.
     --punch           Read BDF in punch mode
     --verbose, -v     Enable verbose logging
 
@@ -51,6 +55,7 @@ import heapq
 from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
+from scipy.spatial import KDTree
 
 try:
     from pyNastran.bdf.bdf import BDF
@@ -253,6 +258,65 @@ def build_edge_heap(
 
 
 # ---------------------------------------------------------------------------
+# Original surface reference (for OML preservation)
+# ---------------------------------------------------------------------------
+
+def build_surface_reference(
+    model: BDF,
+    node_positions: Dict[int, np.ndarray],
+) -> Tuple[Dict[int, np.ndarray], Dict[int, np.ndarray], Optional[KDTree], np.ndarray]:
+    """
+    Build an original-surface reference for OML shape preservation.
+
+    Computes centroid and unit normal of every 2D element in the current mesh
+    and builds a KD-tree of all original node positions.
+
+    Returns:
+        original_normals:   {eid: unit_normal_vector}
+        original_centroids: {eid: centroid_xyz}
+        surface_kdtree:     KDTree of original node positions (or None)
+        surface_points:     (N, 3) array of node positions used in the KDTree
+    """
+    shell_types = {'CQUAD4', 'CTRIA3'}
+    original_normals: Dict[int, np.ndarray] = {}
+    original_centroids: Dict[int, np.ndarray] = {}
+
+    for eid, elem in model.elements.items():
+        if elem.type not in shell_types:
+            continue
+        nodes = [n if isinstance(n, int) else n for n in elem.nodes]
+        positions = [node_positions[n] for n in nodes if n in node_positions]
+        if len(positions) < 3:
+            continue
+
+        centroid = np.mean(positions, axis=0)
+        original_centroids[eid] = centroid
+
+        # Normal from first three vertices (works for both tri and quad)
+        v1 = positions[1] - positions[0]
+        v2 = positions[2] - positions[0]
+        cross = np.cross(v1, v2)
+        mag = np.linalg.norm(cross)
+        if mag > 1e-15:
+            original_normals[eid] = cross / mag
+        else:
+            original_normals[eid] = np.array([0.0, 0.0, 0.0])
+
+    # Build KD-tree from original element centroids for nearest-surface queries.
+    # Element centroids are a better surface representation than raw node positions
+    # because they capture the actual surface location (nodes may sit at edges/corners).
+    centroid_eids = list(original_centroids.keys())
+    if centroid_eids:
+        surface_points = np.array([original_centroids[eid] for eid in centroid_eids])
+        surface_kdtree = KDTree(surface_points)
+    else:
+        surface_points = np.empty((0, 3))
+        surface_kdtree = None
+
+    return original_normals, original_centroids, surface_kdtree, surface_points
+
+
+# ---------------------------------------------------------------------------
 # Quality checks
 # ---------------------------------------------------------------------------
 
@@ -302,10 +366,20 @@ def check_collapse_quality(
     n_keep: int,
     node_to_elems: Dict[int, Set[int]],
     min_quality: float,
-) -> bool:
+    original_normals: Optional[Dict[int, np.ndarray]] = None,
+    original_centroids: Optional[Dict[int, np.ndarray]] = None,
+    surface_kdtree: Optional[KDTree] = None,
+    max_normal_dev_cos: float = -1.0,
+    max_chord_dev: float = 0.0,
+) -> str:
     """
     Check if collapsing n_remove into n_keep would produce acceptable elements.
-    Returns True if all resulting elements pass quality checks.
+
+    Returns:
+        "ok" if the collapse is acceptable.
+        "quality" if element quality or inversion check failed.
+        "normal_dev" if normal deviation from original surface exceeded.
+        "chord_dev" if centroid departure from original surface exceeded.
     """
     affected_eids = set()
     if n_remove in node_to_elems:
@@ -337,7 +411,7 @@ def check_collapse_quality(
 
         # CQUAD4 with < 3 unique nodes -> would be degenerate line (bad)
         if elem.type == 'CQUAD4' and len(unique_nodes) < 3:
-            return False
+            return "quality"
 
         # CQUAD4 with 3 unique -> will become CTRIA3
         if elem.type == 'CQUAD4' and len(unique_nodes) == 3:
@@ -346,10 +420,10 @@ def check_collapse_quality(
         # Check quality of resulting element
         if len(new_nodes) >= 3:
             if not all(n in node_positions for n in new_nodes):
-                return False
+                return "quality"
             quality = compute_element_quality(node_positions, new_nodes)
             if quality < min_quality:
-                return False
+                return "quality"
 
             # Check for inverted element (normal direction should be consistent)
             positions = [node_positions[n] for n in new_nodes]
@@ -364,9 +438,27 @@ def check_collapse_quality(
                         old_positions[0], old_positions[1], old_positions[2]
                     )
                     if np.dot(new_normal, old_normal) < 0:
-                        return False  # Inverted
+                        return "quality"  # Inverted
 
-    return True
+            # --- OML preservation: normal deviation check ---
+            if original_normals is not None and max_normal_dev_cos > -1.0:
+                if eid in original_normals:
+                    orig_normal = original_normals[eid]
+                    if np.linalg.norm(orig_normal) > 1e-15 and len(positions) >= 3:
+                        new_norm_mag = np.linalg.norm(new_normal)
+                        if new_norm_mag > 1e-15:
+                            cos_angle = np.dot(new_normal, orig_normal)
+                            if cos_angle < max_normal_dev_cos:
+                                return "normal_dev"
+
+            # --- OML preservation: chord deviation check ---
+            if surface_kdtree is not None and max_chord_dev > 0.0:
+                new_centroid = np.mean(positions, axis=0)
+                dist, _ = surface_kdtree.query(new_centroid)
+                if dist > max_chord_dev:
+                    return "chord_dev"
+
+    return "ok"
 
 
 # ---------------------------------------------------------------------------
@@ -1000,6 +1092,8 @@ def coarsen_mesh(
     protect_pids: Optional[List[int]] = None,
     max_iterations: int = 0,
     min_quality: float = 0.1,
+    max_normal_dev: float = 15.0,
+    max_chord_dev: float = 0.0,
     do_fill_holes: bool = False,
     punch: bool = False,
     verbose: bool = False,
@@ -1015,6 +1109,10 @@ def coarsen_mesh(
         protect_pids: Additional PIDs whose nodes are protected
         max_iterations: Max collapses (0 = unlimited)
         min_quality: Minimum element quality (0-1) to allow a collapse
+        max_normal_dev: Maximum allowed element normal deviation in degrees
+                        from original surface (default: 15.0). Set to 0 to disable.
+        max_chord_dev: Maximum allowed centroid departure distance from original
+                       surface (default: 0 = auto, target_min / 3).
         do_fill_holes: Detect and collapse interior holes, removing RBE wagon wheels
         punch: Read in punch mode
         verbose: Verbose logging
@@ -1057,6 +1155,24 @@ def coarsen_mesh(
     logger.info(f"Initial mesh: {total_nodes} nodes, {total_elements} elements")
     logger.info(f"Target minimum edge length: {target_min}")
     logger.info(f"Minimum element quality: {min_quality}")
+
+    # --- OML preservation: build original surface reference ---
+    original_normals, original_centroids, surface_kdtree, _ = \
+        build_surface_reference(model, node_positions)
+
+    # Compute cosine threshold from degree input (0 = disabled)
+    if max_normal_dev > 0:
+        max_normal_dev_cos = np.cos(np.radians(max_normal_dev))
+    else:
+        max_normal_dev_cos = -1.0  # disabled
+
+    # Auto chord deviation: target_min / 3 if not explicitly set
+    if max_chord_dev <= 0:
+        max_chord_dev = target_min / 3.0
+
+    logger.info(f"Max normal deviation: {max_normal_dev:.1f} deg "
+                f"(cos threshold={max_normal_dev_cos:.4f})")
+    logger.info(f"Max chord deviation: {max_chord_dev:.4f}")
 
     # Fill holes BEFORE coarsening (so collapsed hole nodes don't interfere)
     hole_stats = {}
@@ -1106,6 +1222,8 @@ def coarsen_mesh(
         'quads_to_tris': 0,
         'skipped_both_protected': 0,
         'skipped_quality': 0,
+        'skipped_normal_dev': 0,
+        'skipped_chord_dev': 0,
     }
 
     removed_nodes: Set[int] = set()
@@ -1155,12 +1273,20 @@ def coarsen_mesh(
             else:
                 n_keep, n_remove = n2, n1
 
-        # Quality check before collapse
-        if not check_collapse_quality(model, node_positions, n_remove, n_keep,
-                                      all_node_to_elems, min_quality):
-            stats['skipped_quality'] += 1
+        # Quality and OML preservation check before collapse
+        collapse_result = check_collapse_quality(
+            model, node_positions, n_remove, n_keep,
+            all_node_to_elems, min_quality,
+            original_normals=original_normals,
+            original_centroids=original_centroids,
+            surface_kdtree=surface_kdtree,
+            max_normal_dev_cos=max_normal_dev_cos,
+            max_chord_dev=max_chord_dev,
+        )
+        if collapse_result != "ok":
+            stats[f'skipped_{collapse_result}'] += 1
             logger.debug(f"  Edge ({n1},{n2}) L={current_length:.4f}: "
-                        f"quality check failed, skip")
+                        f"{collapse_result} check failed, skip")
             continue
 
         # Perform the collapse
@@ -1202,6 +1328,8 @@ def coarsen_mesh(
     logger.info(f"CQUAD4 -> CTRIA3 conversions: {stats['quads_to_tris']}")
     logger.info(f"Skipped (both protected): {stats['skipped_both_protected']}")
     logger.info(f"Skipped (quality): {stats['skipped_quality']}")
+    logger.info(f"Skipped (normal deviation): {stats['skipped_normal_dev']}")
+    logger.info(f"Skipped (chord deviation): {stats['skipped_chord_dev']}")
     if hole_stats:
         logger.info(f"Holes collapsed: {hole_stats.get('holes_collapsed', 0)}")
         logger.info(f"RBEs removed: {hole_stats.get('rbes_removed', 0)}")
@@ -1229,6 +1357,8 @@ Examples:
   python coarsen_mesh.py --in model.bdf --out coarsened.bdf --target-min 2.0 --pids 100,101
   python coarsen_mesh.py --in model.bdf --out coarsened.bdf --target-min 2.0 --protect-pids 200
   python coarsen_mesh.py --in model.bdf --out coarsened.bdf --target-min 1.5 --min-quality 0.2
+  python coarsen_mesh.py --in model.bdf --out coarsened.bdf --target-min 2.0 --max-normal-dev 10
+  python coarsen_mesh.py --in model.bdf --out coarsened.bdf --target-min 2.0 --max-chord-dev 0.5
 """
     )
 
@@ -1246,6 +1376,13 @@ Examples:
                         help='Max collapse iterations (default: 0 = unlimited)')
     parser.add_argument('--min-quality', type=float, default=0.1,
                         help='Minimum element quality to allow collapse (default: 0.1)')
+    parser.add_argument('--max-normal-dev', type=float, default=15.0,
+                        help='Max element normal deviation from original surface in degrees '
+                             '(default: 15). Set to 0 to disable.')
+    parser.add_argument('--max-chord-dev', type=float, default=0.0,
+                        help='Max centroid departure from original surface '
+                             '(default: 0 = auto, target-min / 3). '
+                             'Prevents chord shortcutting across curves.')
     parser.add_argument('--fill-holes', action='store_true',
                         help='Detect and collapse interior holes, removing RBE wagon wheels')
     parser.add_argument('--punch', action='store_true',
@@ -1281,6 +1418,8 @@ Examples:
             protect_pids=protect_pids,
             max_iterations=args.max_iterations,
             min_quality=args.min_quality,
+            max_normal_dev=args.max_normal_dev,
+            max_chord_dev=args.max_chord_dev,
             do_fill_holes=args.fill_holes,
             punch=args.punch,
             verbose=args.verbose,

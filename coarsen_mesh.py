@@ -156,19 +156,13 @@ def build_protected_nodes(
                 if isinstance(n, int):
                     rigid_nodes.add(n)
 
-        # RBE3: reference grid (refgrid) and weighted nodes (Gijs)
+        # RBE3: protect the reference grid only.  Gijs (weighted/dependent)
+        # nodes are interpolation points — they can be collapsed and the
+        # RBE3 updated to use the surviving node.  The safety-net in
+        # collapse_edge handles the Gijs update via _replace_node_in_rigid.
         refgrid = getattr(elem, 'refgrid', None)
         if isinstance(refgrid, int):
             rigid_nodes.add(refgrid)
-        gijs = getattr(elem, 'Gijs', [])
-        if gijs:
-            for g in gijs:
-                if isinstance(g, int):
-                    rigid_nodes.add(g)
-                elif isinstance(g, list):
-                    for n in g:
-                        if isinstance(n, int):
-                            rigid_nodes.add(n)
 
         # RBAR / RROD: nodes attribute
         for attr in ('ga', 'gb'):
@@ -1824,6 +1818,33 @@ def coarsen_mesh(
         logger.info(f"Holes collapsed: {hole_stats.get('holes_collapsed', 0)}")
         logger.info(f"RBEs removed: {hole_stats.get('rbes_removed', 0)}")
         logger.info(f"Connections reattached: {hole_stats.get('connections_reattached', 0)}")
+
+    # Clean up RBE3 elements: remove duplicate Gijs entries that result
+    # from multiple collapsed nodes mapping to the same survivor.
+    for rbe_eid, rbe_elem in model.rigid_elements.items():
+        if rbe_elem.type != 'RBE3':
+            continue
+        gijs = getattr(rbe_elem, 'Gijs', [])
+        if not gijs:
+            continue
+        # Gijs is a list of lists; deduplicate within each weight group
+        new_gijs = []
+        for gij_group in gijs:
+            if isinstance(gij_group, list):
+                seen = set()
+                deduped = []
+                for n in gij_group:
+                    if n not in seen:
+                        seen.add(n)
+                        deduped.append(n)
+                new_gijs.append(deduped)
+            else:
+                new_gijs.append(gij_group)
+        rbe_elem.Gijs = new_gijs
+        # Update the corresponding weight counts (Gmi_wt maps to Gijs groups)
+        # Each Gijs group corresponds to one (alpha, comps, Gij_list) triplet.
+        # The pyNastran RBE3 stores: refgrid, refc, weights, comps, Gijs
+        # where len(weights) == len(comps) == len(Gijs).
 
     # Write output in large-field format to preserve coordinate precision
     logger.info(f"\nWriting coarsened BDF: {output_file}")

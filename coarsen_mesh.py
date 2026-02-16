@@ -23,7 +23,7 @@ OPTIONS:
     --max-normal-dev  Max element normal deviation from original surface in degrees
                       (default: 15). Prevents OML shape distortion on curved regions.
     --max-chord-dev   Max centroid departure from original surface (default: auto,
-                      target-min / 3). Prevents chord shortcutting across curves.
+                      same as target-min). Prevents chord shortcutting across curves.
     --feature-angle   Dihedral angle threshold for protecting sharp corners/creases
                       (default: 30 degrees). Nodes on edges where adjacent element
                       normals differ by more than this are locked in place.
@@ -608,7 +608,7 @@ def compute_element_quality(node_positions: Dict[int, np.ndarray],
 
     Checks:
       - Aspect ratio: min_edge / max_edge
-      - Interior angles: no angle < 10 deg or > 170 deg (tri) / > 160 deg (quad)
+      - Interior angles: no angle < 5 deg or > 175 deg
       - Warp (CQUAD4 only): non-planarity must be < max_warp degrees
       - Taper (CQUAD4 only): ratio of areas of triangles formed by diagonals
     """
@@ -636,16 +636,14 @@ def compute_element_quality(node_positions: Dict[int, np.ndarray],
     min_angle = min(angles) if angles else 0.0
     max_angle = max(angles) if angles else 180.0
 
-    if min_angle < 5.0:
+    if min_angle < 1.0:
         return 0.0
 
     if n == 3:
-        # Triangle: reject if any angle > 170 deg
-        if max_angle > 170.0:
+        if max_angle > 175.0 or min_angle < 5.0:
             return 0.0
     elif n == 4:
-        # Quad: reject if any angle > 160 deg or < 10 deg
-        if max_angle > 160.0 or min_angle < 10.0:
+        if max_angle > 175.0 or min_angle < 5.0:
             return 0.0
 
         # Warp check (quad only)
@@ -769,47 +767,6 @@ def check_collapse_quality(
                 dist, _ = surface_kdtree.query(new_centroid)
                 if dist > max_chord_dev:
                     return "chord_dev"
-
-    # --- Area conservation check ---
-    # Compute total area before and after collapse.  Reject if more than
-    # 5% of the local area is lost (prevents boundary erosion).
-    area_before = 0.0
-    area_after = 0.0
-    for eid in affected_eids:
-        if eid not in model.elements:
-            continue
-        elem = model.elements[eid]
-        if elem.type not in ('CQUAD4', 'CTRIA3'):
-            continue
-        old_nodes = [n if isinstance(n, int) else n for n in elem.nodes]
-        old_pos = [node_positions[n] for n in old_nodes if n in node_positions]
-        if len(old_pos) >= 3:
-            a, _ = compute_tri_area_normal(old_pos[0], old_pos[1], old_pos[2])
-            if len(old_pos) == 4:
-                a2, _ = compute_tri_area_normal(old_pos[0], old_pos[2], old_pos[3])
-                a += a2
-            area_before += a
-
-        # Simulate collapse
-        new_nds = [n_keep if n == n_remove else n for n in old_nodes]
-        unique = []
-        for n in new_nds:
-            if n not in unique:
-                unique.append(n)
-        if len(unique) < 3:
-            continue  # element removed
-        new_pos = [node_positions[n] for n in unique if n in node_positions]
-        if len(new_pos) >= 3:
-            a, _ = compute_tri_area_normal(new_pos[0], new_pos[1], new_pos[2])
-            if len(new_pos) == 4:
-                a2, _ = compute_tri_area_normal(new_pos[0], new_pos[2], new_pos[3])
-                a += a2
-            area_after += a
-
-    if area_before > 1e-15:
-        area_loss = (area_before - area_after) / area_before
-        if area_loss > 0.05:
-            return "quality"
 
     return "ok"
 
@@ -1565,7 +1522,7 @@ def coarsen_mesh(
         max_normal_dev: Maximum allowed element normal deviation in degrees
                         from original surface (default: 15.0). Set to 0 to disable.
         max_chord_dev: Maximum allowed centroid departure distance from original
-                       surface (default: 0 = auto, target_min / 3).
+                       surface (default: 0 = auto, same as target_min).
         feature_angle: Dihedral angle threshold in degrees for feature edge
                        detection (default: 30). Nodes on edges where adjacent
                        element normals differ by more than this are protected.
@@ -1632,9 +1589,9 @@ def coarsen_mesh(
     else:
         max_normal_dev_cos = -1.0  # disabled
 
-    # Auto chord deviation: target_min / 3 if not explicitly set
+    # Auto chord deviation: same as target_min if not explicitly set
     if max_chord_dev <= 0:
-        max_chord_dev = target_min / 3.0
+        max_chord_dev = target_min
 
     logger.info(f"Max normal deviation: {max_normal_dev:.1f} deg "
                 f"(cos threshold={max_normal_dev_cos:.4f})")
@@ -1702,6 +1659,27 @@ def coarsen_mesh(
     removed_nodes: Set[int] = set()
     iteration = 0
 
+    # Per-PID area budget: compute initial area per PID and track removals.
+    # Reject collapses that would push any PID past 1% total area loss.
+    shell_types_area = {'CQUAD4', 'CTRIA3'}
+    pid_total_area: Dict[int, float] = {}
+    elem_pid_map: Dict[int, int] = {}
+    for eid, elem in model.elements.items():
+        if elem.type not in shell_types_area:
+            continue
+        pid = elem.pid if isinstance(elem.pid, int) else elem.pid
+        elem_pid_map[eid] = pid
+        nodes = [n if isinstance(n, int) else n for n in elem.nodes]
+        pos = [node_positions[n] for n in nodes if n in node_positions]
+        if len(pos) >= 3:
+            a, _ = compute_tri_area_normal(pos[0], pos[1], pos[2])
+            if len(pos) == 4:
+                a2, _ = compute_tri_area_normal(pos[0], pos[2], pos[3])
+                a += a2
+            pid_total_area[pid] = pid_total_area.get(pid, 0.0) + a
+    pid_area_removed: Dict[int, float] = {pid: 0.0 for pid in pid_total_area}
+    max_area_loss_frac = 0.02  # 2% of total PID area
+
     # Process edges shortest first
     while heap:
         if max_iterations > 0 and iteration >= max_iterations:
@@ -1763,6 +1741,75 @@ def coarsen_mesh(
                         f"{collapse_result} check failed, skip")
             continue
 
+        # Per-PID area budget check: only for boundary collapses where
+        # element removal causes actual area loss.  Interior collapses
+        # redistribute area without losing it.
+        involves_boundary = (n_keep in boundary_nodes or n_remove in boundary_nodes)
+        area_loss_by_pid: Dict[int, float] = {}
+
+        if involves_boundary:
+            affected_for_area = set()
+            if n_remove in all_node_to_elems:
+                affected_for_area |= all_node_to_elems[n_remove]
+            if n_keep in all_node_to_elems:
+                affected_for_area |= all_node_to_elems[n_keep]
+
+            for eid in affected_for_area:
+                if eid not in model.elements:
+                    continue
+                elem = model.elements[eid]
+                if elem.type not in shell_types_area:
+                    continue
+                pid = elem_pid_map.get(eid, -1)
+                old_nodes_a = [n if isinstance(n, int) else n for n in elem.nodes]
+                old_pos = [node_positions[n] for n in old_nodes_a
+                           if n in node_positions]
+                if len(old_pos) < 3:
+                    continue
+                a_old, _ = compute_tri_area_normal(
+                    old_pos[0], old_pos[1], old_pos[2])
+                if len(old_pos) == 4:
+                    a2, _ = compute_tri_area_normal(
+                        old_pos[0], old_pos[2], old_pos[3])
+                    a_old += a2
+
+                new_nds = [n_keep if n == n_remove else n for n in old_nodes_a]
+                unique = []
+                for n in new_nds:
+                    if n not in unique:
+                        unique.append(n)
+                if len(unique) < 3:
+                    area_loss_by_pid[pid] = \
+                        area_loss_by_pid.get(pid, 0.0) + a_old
+                    continue
+                new_pos = [node_positions[n] for n in unique
+                           if n in node_positions]
+                if len(new_pos) >= 3:
+                    a_new, _ = compute_tri_area_normal(
+                        new_pos[0], new_pos[1], new_pos[2])
+                    if len(new_pos) == 4:
+                        a2, _ = compute_tri_area_normal(
+                            new_pos[0], new_pos[2], new_pos[3])
+                        a_new += a2
+                    if a_old > a_new:
+                        area_loss_by_pid[pid] = \
+                            area_loss_by_pid.get(pid, 0.0) + (a_old - a_new)
+
+            budget_exceeded = False
+            for pid, loss in area_loss_by_pid.items():
+                total = pid_total_area.get(pid, 0.0)
+                if total > 1e-15:
+                    cumulative = pid_area_removed.get(pid, 0.0) + loss
+                    if cumulative / total > max_area_loss_frac:
+                        budget_exceeded = True
+                        break
+
+            if budget_exceeded:
+                stats['skipped_quality'] += 1
+                logger.debug(f"  Edge ({n1},{n2}) L={current_length:.4f}: "
+                            f"PID area budget exceeded, skip")
+                continue
+
         # For boundary edges: move surviving node to midpoint to preserve
         # the boundary line geometry and minimize area loss.
         both_boundary = (n_keep in boundary_nodes and n_remove in boundary_nodes)
@@ -1772,6 +1819,10 @@ def coarsen_mesh(
             if n_keep in model.nodes:
                 node = model.nodes[n_keep]
                 node.xyz = midpoint.copy()
+
+        # Update area budget after successful collapse
+        for pid, loss in area_loss_by_pid.items():
+            pid_area_removed[pid] = pid_area_removed.get(pid, 0.0) + loss
 
         # Perform the collapse
         logger.debug(f"  Collapse ({n_remove} -> {n_keep}) L={current_length:.4f}")
@@ -1948,7 +1999,7 @@ Examples:
                              '(default: 15). Set to 0 to disable.')
     parser.add_argument('--max-chord-dev', type=float, default=0.0,
                         help='Max centroid departure from original surface '
-                             '(default: 0 = auto, target-min / 3). '
+                             '(default: 0 = auto, same as target-min). '
                              'Prevents chord shortcutting across curves.')
     parser.add_argument('--feature-angle', type=float, default=30.0,
                         help='Dihedral angle threshold in degrees for protecting '

@@ -82,7 +82,7 @@ def build_protected_nodes(
     extra_protect_pids: Optional[Set[int]] = None,
     node_positions: Optional[Dict[int, np.ndarray]] = None,
     feature_angle: float = 30.0,
-) -> Set[int]:
+) -> Tuple[Set[int], Set[int]]:
     """
     Build the set of nodes that must NOT be moved or removed.
 
@@ -93,10 +93,14 @@ def build_protected_nodes(
       - Nodes on mass elements (CONM1, CONM2, CMASS1-4)
       - Nodes referenced by SPCs or MPCs
       - Nodes on property boundaries (shared by elements with different PIDs)
-      - Nodes on mesh boundaries (edge used by only one 2D element)
+      - Nodes on sharp boundary corners (detected by feature_angle)
       - Nodes on geometric feature edges (adjacent element normals differ by
         more than feature_angle degrees -- sharp corners/creases)
       - Nodes on elements with extra_protect_pids
+
+    Note: smooth boundary-run nodes are NOT protected so that outer edges
+    can be coarsened.  When collapsing a boundary edge the caller should
+    move the surviving node to the midpoint to preserve geometry.
 
     Args:
         node_positions: {nid: xyz} needed for feature edge detection.
@@ -104,6 +108,10 @@ def build_protected_nodes(
         feature_angle: Dihedral angle threshold in degrees (default 30).
                        Edges where adjacent element normals differ by more
                        than this angle are treated as geometric features.
+
+    Returns:
+        (protected_nodes, boundary_nodes) - the set of locked nodes and the
+        set of all mesh-boundary nodes (including non-protected ones).
     """
     protected: Set[int] = set()
 
@@ -241,10 +249,15 @@ def build_protected_nodes(
             edge = (min(n1, n2), max(n1, n2))
             edge_count[edge] = edge_count.get(edge, 0) + 1
 
+    # Identify boundary nodes (on free edges) but do NOT blanket-protect them.
+    # Only sharp corners will be protected (below).  Smooth boundary runs
+    # can be coarsened — intermediate nodes are removed and the surviving
+    # node stays on the original edge line.
+    boundary_node_set_preliminary: Set[int] = set()
     for (n1, n2), count in edge_count.items():
         if count == 1:
-            protected.add(n1)
-            protected.add(n2)
+            boundary_node_set_preliminary.add(n1)
+            boundary_node_set_preliminary.add(n2)
 
     # --- Geometric feature edges (sharp corners/creases) ---
     # An interior edge shared by two 2D elements is a feature edge if
@@ -334,6 +347,12 @@ def build_protected_nodes(
 
         boundary_nodes_set = set(boundary_adj.keys())
 
+        # Protect boundary endpoints and T-junctions (nodes with != 2
+        # boundary neighbors are topological singularities that must stay)
+        for nid, neighbors in boundary_adj.items():
+            if len(neighbors) != 2:
+                protected.add(nid)
+
         for nid, neighbors in boundary_adj.items():
             if len(neighbors) < 2 or nid not in node_positions:
                 continue
@@ -388,7 +407,7 @@ def build_protected_nodes(
             logger.debug(f"Interior feature edges: {feature_protected} "
                         f"nodes protected (dihedral > {feature_angle} deg)")
 
-    return protected
+    return protected, boundary_node_set_preliminary
 
 
 # ---------------------------------------------------------------------------
@@ -756,6 +775,47 @@ def check_collapse_quality(
                 dist, _ = surface_kdtree.query(new_centroid)
                 if dist > max_chord_dev:
                     return "chord_dev"
+
+    # --- Area conservation check ---
+    # Compute total area before and after collapse.  Reject if more than
+    # 5% of the local area is lost (prevents boundary erosion).
+    area_before = 0.0
+    area_after = 0.0
+    for eid in affected_eids:
+        if eid not in model.elements:
+            continue
+        elem = model.elements[eid]
+        if elem.type not in ('CQUAD4', 'CTRIA3'):
+            continue
+        old_nodes = [n if isinstance(n, int) else n for n in elem.nodes]
+        old_pos = [node_positions[n] for n in old_nodes if n in node_positions]
+        if len(old_pos) >= 3:
+            a, _ = compute_tri_area_normal(old_pos[0], old_pos[1], old_pos[2])
+            if len(old_pos) == 4:
+                a2, _ = compute_tri_area_normal(old_pos[0], old_pos[2], old_pos[3])
+                a += a2
+            area_before += a
+
+        # Simulate collapse
+        new_nds = [n_keep if n == n_remove else n for n in old_nodes]
+        unique = []
+        for n in new_nds:
+            if n not in unique:
+                unique.append(n)
+        if len(unique) < 3:
+            continue  # element removed
+        new_pos = [node_positions[n] for n in unique if n in node_positions]
+        if len(new_pos) >= 3:
+            a, _ = compute_tri_area_normal(new_pos[0], new_pos[1], new_pos[2])
+            if len(new_pos) == 4:
+                a2, _ = compute_tri_area_normal(new_pos[0], new_pos[2], new_pos[3])
+                a += a2
+            area_after += a
+
+    if area_before > 1e-15:
+        area_loss = (area_before - area_after) / area_before
+        if area_loss > 0.05:
+            return "quality"
 
     return "ok"
 
@@ -1598,12 +1658,15 @@ def coarsen_mesh(
     extra_protect = set(protect_pids) if protect_pids else None
 
     # Build protected node set
-    protected = build_protected_nodes(
+    protected, boundary_nodes = build_protected_nodes(
         model, eligible_pids, extra_protect,
         node_positions=node_positions,
         feature_angle=feature_angle,
     )
     logger.info(f"Protected nodes: {len(protected)}")
+    logger.info(f"Boundary nodes: {len(boundary_nodes)} "
+                f"({len(boundary_nodes & protected)} protected, "
+                f"{len(boundary_nodes - protected)} coarsenable)")
 
     # Build connectivity maps
     edge_to_elems, node_to_elems = build_edge_list(model, eligible_pids)
@@ -1705,6 +1768,16 @@ def coarsen_mesh(
             logger.debug(f"  Edge ({n1},{n2}) L={current_length:.4f}: "
                         f"{collapse_result} check failed, skip")
             continue
+
+        # For boundary edges: move surviving node to midpoint to preserve
+        # the boundary line geometry and minimize area loss.
+        both_boundary = (n_keep in boundary_nodes and n_remove in boundary_nodes)
+        if both_boundary and not n1_protected and not n2_protected:
+            midpoint = (node_positions[n_keep] + node_positions[n_remove]) / 2.0
+            node_positions[n_keep] = midpoint
+            if n_keep in model.nodes:
+                node = model.nodes[n_keep]
+                node.xyz = midpoint.copy()
 
         # Perform the collapse
         logger.debug(f"  Collapse ({n_remove} -> {n_keep}) L={current_length:.4f}")

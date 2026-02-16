@@ -304,9 +304,87 @@ def build_protected_nodes(
                 protected.add(e_n1)
                 protected.add(e_n2)
 
+        # --- Exterior (free-edge) feature corners ---
+        # At boundary nodes where two free edges meet, check if the chain
+        # makes a sharp turn.  A straight boundary has a turning angle of
+        # ~180 degrees; anything less than (180 - feature_angle) means the
+        # boundary direction changes sharply.  Protect the corner node AND
+        # its interior (non-boundary) neighbors so that collapsing edges
+        # one row inward cannot round the corner.
+        boundary_turn_threshold = 180.0 - feature_angle  # e.g. 150 deg
+        boundary_cos = np.cos(np.radians(boundary_turn_threshold))
+        boundary_corners = 0
+        boundary_interior = 0
+
+        # Build boundary-node adjacency from free edges
+        free_edges_set: Set[Tuple[int, int]] = set()
+        boundary_adj: Dict[int, List[int]] = {}
+        for (e_n1, e_n2), eids in edge_elems.items():
+            if len(eids) != 1:
+                continue
+            free_edges_set.add((e_n1, e_n2))
+            if e_n1 not in boundary_adj:
+                boundary_adj[e_n1] = []
+            boundary_adj[e_n1].append(e_n2)
+            if e_n2 not in boundary_adj:
+                boundary_adj[e_n2] = []
+            boundary_adj[e_n2].append(e_n1)
+
+        boundary_nodes_set = set(boundary_adj.keys())
+
+        for nid, neighbors in boundary_adj.items():
+            if len(neighbors) < 2 or nid not in node_positions:
+                continue
+            # Compute edge vectors from this node to its boundary neighbors
+            vectors = []
+            for nbr in neighbors:
+                if nbr in node_positions:
+                    vec = node_positions[nbr] - node_positions[nid]
+                    mag = np.linalg.norm(vec)
+                    if mag > 1e-15:
+                        vectors.append(vec / mag)
+            if len(vectors) < 2:
+                continue
+
+            # Check all pairs (usually just 2 neighbors at a boundary node)
+            is_sharp = False
+            for vi in range(len(vectors)):
+                for vj in range(vi + 1, len(vectors)):
+                    cos_a = np.dot(vectors[vi], vectors[vj])
+                    # cos_a ~ -1 means straight (180 deg), higher means sharper turn
+                    if cos_a > boundary_cos:
+                        is_sharp = True
+                        break
+                if is_sharp:
+                    break
+
+            if is_sharp:
+                if nid not in protected:
+                    boundary_corners += 1
+                protected.add(nid)
+
+                # Protect interior neighbors (one hop inward) so edges
+                # adjacent to this corner cannot be collapsed
+                for eid2, elem2 in model.elements.items():
+                    if elem2.type not in shell_types:
+                        continue
+                    enodes = [n if isinstance(n, int) else n
+                              for n in elem2.nodes]
+                    if nid in enodes:
+                        for en in enodes:
+                            if en != nid and en not in boundary_nodes_set:
+                                if en not in protected:
+                                    boundary_interior += 1
+                                protected.add(en)
+
+        if boundary_corners > 0 or boundary_interior > 0:
+            logger.debug(f"Exterior feature detection: {boundary_corners} "
+                        f"corner nodes + {boundary_interior} interior "
+                        f"neighbors protected")
+
         if feature_protected > 0:
-            logger.debug(f"Feature edge detection: {feature_protected} "
-                        f"additional nodes protected (angle > {feature_angle} deg)")
+            logger.debug(f"Interior feature edges: {feature_protected} "
+                        f"nodes protected (dihedral > {feature_angle} deg)")
 
     return protected
 

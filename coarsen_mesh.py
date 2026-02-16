@@ -1166,6 +1166,64 @@ def _replace_node_in_rigid(elem, old_nid: int, new_nid: int) -> None:
                 elem.nodes[i] = new_nid
 
 
+# ---------------------------------------------------------------------------
+# Mass calculation
+# ---------------------------------------------------------------------------
+
+def calculate_total_mass(
+    model: BDF,
+    mass_to_lbs_factor: float = 386.4,
+) -> Tuple[float, float, Dict[int, float]]:
+    """
+    Calculate total mass of the model (must be cross-referenced).
+
+    Returns:
+        (mass_model_units, mass_lbs, per_pid_breakdown)
+    """
+    per_pid: Dict[int, float] = {}
+    total_mass = 0.0
+
+    try:
+        mass_breakdown = model.get_mass_breakdown(stop_on_failure=False)
+        for pid, mass_data in mass_breakdown.items():
+            if isinstance(mass_data, (int, float)):
+                per_pid[pid] = float(mass_data)
+                total_mass += float(mass_data)
+            elif isinstance(mass_data, dict):
+                pid_total = 0.0
+                for val in mass_data.values():
+                    if isinstance(val, (int, float)):
+                        pid_total += float(val)
+                per_pid[pid] = pid_total
+                total_mass += pid_total
+    except Exception:
+        # Fallback: sum element masses directly
+        for eid, elem in model.elements.items():
+            try:
+                m = elem.Mass()
+                pid = getattr(elem, 'pid', 0)
+                pid = pid if isinstance(pid, int) else 0
+                per_pid[pid] = per_pid.get(pid, 0.0) + m
+                total_mass += m
+            except Exception:
+                pass
+
+    # Add CONM2 / CMASS masses
+    conm_mass = 0.0
+    for mid, mass_elem in model.masses.items():
+        try:
+            m = mass_elem.Mass()
+            conm_mass += m
+        except Exception:
+            pass
+    if conm_mass > 0:
+        per_pid[-1] = conm_mass  # Use PID=-1 for lumped masses
+        total_mass += conm_mass
+
+    mass_lbs = total_mass * mass_to_lbs_factor
+    return total_mass, mass_lbs, per_pid
+
+
 def coarsen_mesh(
     input_file: str,
     output_file: str,
@@ -1179,6 +1237,7 @@ def coarsen_mesh(
     do_fill_holes: bool = False,
     punch: bool = False,
     verbose: bool = False,
+    mass_to_lbs_factor: float = 386.4,
 ) -> Dict:
     """
     Coarsen a BDF mesh by collapsing edges shorter than target_min.
@@ -1198,6 +1257,7 @@ def coarsen_mesh(
         do_fill_holes: Detect and collapse interior holes, removing RBE wagon wheels
         punch: Read in punch mode
         verbose: Verbose logging
+        mass_to_lbs_factor: Conversion factor from model mass units to lbs
     """
     # Setup logging
     logger.setLevel(logging.DEBUG)
@@ -1228,6 +1288,12 @@ def coarsen_mesh(
     node_positions: Dict[int, np.ndarray] = {}
     for nid, node in model.nodes.items():
         node_positions[nid] = node.get_position().copy()
+
+    # Capture initial mass while model is still cross-referenced
+    initial_mass, initial_mass_lbs, initial_mass_by_pid = \
+        calculate_total_mass(model, mass_to_lbs_factor)
+    logger.info(f"Initial mass: {initial_mass:.6f} (model units) = "
+                f"{initial_mass_lbs:.2f} lbs")
 
     # Un-cross-reference so elem.nodes are integers, not objects
     model.uncross_reference()
@@ -1419,7 +1485,63 @@ def coarsen_mesh(
     # Write output in large-field format to preserve coordinate precision
     logger.info(f"\nWriting coarsened BDF: {output_file}")
     model.write_bdf(output_file, size=16, is_double=False)
-    logger.info("Done.")
+
+    # --- Mass conservation check ---
+    logger.info("\n--- Mass Check ---")
+    try:
+        check_model = BDF()
+        check_model.read_bdf(output_file, xref=True, punch=punch)
+        final_mass, final_mass_lbs, final_mass_by_pid = \
+            calculate_total_mass(check_model, mass_to_lbs_factor)
+    except Exception as e:
+        logger.warning(f"Could not compute final mass: {e}")
+        final_mass = 0.0
+        final_mass_lbs = 0.0
+        final_mass_by_pid = {}
+
+    logger.info(f"Initial mass: {initial_mass:.6f} (model units) = "
+                f"{initial_mass_lbs:.2f} lbs")
+    logger.info(f"Final mass:   {final_mass:.6f} (model units) = "
+                f"{final_mass_lbs:.2f} lbs")
+
+    if initial_mass > 0:
+        mass_diff = abs(final_mass - initial_mass)
+        mass_diff_pct = mass_diff / initial_mass * 100
+        logger.info(f"Difference:   {mass_diff:.6f} ({mass_diff_pct:.4f}%)")
+        if mass_diff_pct < 0.01:
+            logger.info("[OK] Mass conserved (< 0.01% difference)")
+        elif mass_diff_pct < 1.0:
+            logger.warning(f"[WARN] Mass changed by {mass_diff_pct:.4f}%")
+        else:
+            logger.error(f"[FAIL] Mass changed by {mass_diff_pct:.4f}% - "
+                        f"check element removal")
+    else:
+        mass_diff_pct = 0.0
+        logger.info("(No structural mass detected)")
+
+    # Per-property mass breakdown
+    all_pids = sorted(set(list(initial_mass_by_pid.keys()) +
+                          list(final_mass_by_pid.keys())))
+    if all_pids:
+        logger.info("\nPer-property mass breakdown:")
+        logger.info(f"  {'PID':>8s}  {'Initial':>12s}  {'Final':>12s}  "
+                    f"{'Diff':>12s}  {'Diff%':>8s}")
+        for pid in all_pids:
+            m_init = initial_mass_by_pid.get(pid, 0.0)
+            m_final = final_mass_by_pid.get(pid, 0.0)
+            m_diff = m_final - m_init
+            pct = (abs(m_diff) / m_init * 100) if m_init > 0 else 0.0
+            label = "masses" if pid == -1 else str(pid)
+            logger.info(f"  {label:>8s}  {m_init:12.6f}  {m_final:12.6f}  "
+                       f"{m_diff:+12.6f}  {pct:7.3f}%")
+
+    stats['initial_mass'] = initial_mass
+    stats['final_mass'] = final_mass
+    stats['initial_mass_lbs'] = initial_mass_lbs
+    stats['final_mass_lbs'] = final_mass_lbs
+    stats['mass_diff_pct'] = mass_diff_pct
+
+    logger.info("\nDone.")
 
     return stats
 
@@ -1466,6 +1588,8 @@ Examples:
                              'Prevents chord shortcutting across curves.')
     parser.add_argument('--fill-holes', action='store_true',
                         help='Detect and collapse interior holes, removing RBE wagon wheels')
+    parser.add_argument('--mass-factor', type=float, default=386.4,
+                        help='Mass conversion factor to lbs (default: 386.4)')
     parser.add_argument('--punch', action='store_true',
                         help='Read BDF in punch mode')
     parser.add_argument('--verbose', '-v', action='store_true',
@@ -1504,6 +1628,7 @@ Examples:
             do_fill_holes=args.fill_holes,
             punch=args.punch,
             verbose=args.verbose,
+            mass_to_lbs_factor=args.mass_factor,
         )
     except Exception as e:
         print(f"ERROR: {e}")

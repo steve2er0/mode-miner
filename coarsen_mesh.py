@@ -90,12 +90,17 @@ def build_protected_nodes(
     """
     protected: Set[int] = set()
 
-    # --- 1D elements ---
-    one_d_types = {'CBAR', 'CBEAM', 'CROD', 'CONROD', 'CTUBE'}
+    # --- 1D and connector elements ---
+    connector_types = {'CBAR', 'CBEAM', 'CROD', 'CONROD', 'CTUBE',
+                       'CBUSH', 'CBUSH1D', 'CBUSH2D',
+                       'CELAS1', 'CELAS2', 'CELAS3', 'CELAS4',
+                       'CDAMP1', 'CDAMP2', 'CDAMP3', 'CDAMP4',
+                       'CVISC', 'CGAP'}
     for eid, elem in model.elements.items():
-        if elem.type in one_d_types:
+        if elem.type in connector_types:
             for n in elem.nodes:
-                protected.add(n if isinstance(n, int) else n)
+                if isinstance(n, int) and n > 0:
+                    protected.add(n)
 
     # --- Rigid elements ---
     for eid, elem in model.rigid_elements.items():
@@ -537,7 +542,12 @@ def collapse_edge(
         if eid not in model.elements:
             continue
         elem = model.elements[eid]
+
         if elem.type not in shell_types:
+            # Non-shell element (CBUSH, CBAR, etc.): just replace the node reference
+            for i in range(len(elem.nodes)):
+                if isinstance(elem.nodes[i], int) and elem.nodes[i] == n_remove:
+                    elem.nodes[i] = n_keep
             continue
 
         old_nodes = [n if isinstance(n, int) else n for n in elem.nodes]
@@ -1269,10 +1279,9 @@ def coarsen_mesh(
     # it get updated - not just the eligible ones
     all_node_to_elems: Dict[int, Set[int]] = {}
     for eid, elem in model.elements.items():
-        if elem.type in ('CQUAD4', 'CTRIA3', 'CBAR', 'CBEAM', 'CROD',
-                          'CONROD', 'CTUBE', 'CQUAD8', 'CTRIA6'):
-            for n in elem.nodes:
-                nid = n if isinstance(n, int) else n
+        for n in elem.nodes:
+            nid = n if isinstance(n, int) else n
+            if isinstance(nid, int) and nid > 0:
                 if nid not in all_node_to_elems:
                     all_node_to_elems[nid] = set()
                 all_node_to_elems[nid].add(eid)

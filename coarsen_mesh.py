@@ -1292,7 +1292,7 @@ def coarsen_mesh(
 
     if not heap:
         logger.info("No edges to collapse. Writing output unchanged.")
-        model.write_bdf(output_file)
+        model.write_bdf(output_file, size=16, is_double=False)
         return {'nodes_removed': 0, 'edges_collapsed': 0}
 
     # Stats
@@ -1416,9 +1416,9 @@ def coarsen_mesh(
         logger.info(f"RBEs removed: {hole_stats.get('rbes_removed', 0)}")
         logger.info(f"Connections reattached: {hole_stats.get('connections_reattached', 0)}")
 
-    # Write output (model is already un-cross-referenced)
+    # Write output in large-field format to preserve coordinate precision
     logger.info(f"\nWriting coarsened BDF: {output_file}")
-    model.write_bdf(output_file)
+    model.write_bdf(output_file, size=16, is_double=False)
     logger.info("Done.")
 
     return stats

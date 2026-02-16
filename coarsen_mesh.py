@@ -24,6 +24,9 @@ OPTIONS:
                       (default: 15). Prevents OML shape distortion on curved regions.
     --max-chord-dev   Max centroid departure from original surface (default: auto,
                       target-min / 3). Prevents chord shortcutting across curves.
+    --feature-angle   Dihedral angle threshold for protecting sharp corners/creases
+                      (default: 30 degrees). Nodes on edges where adjacent element
+                      normals differ by more than this are locked in place.
     --punch           Read BDF in punch mode
     --verbose, -v     Enable verbose logging
 
@@ -75,18 +78,30 @@ def build_protected_nodes(
     model: BDF,
     eligible_pids: Optional[Set[int]] = None,
     extra_protect_pids: Optional[Set[int]] = None,
+    node_positions: Optional[Dict[int, np.ndarray]] = None,
+    feature_angle: float = 30.0,
 ) -> Set[int]:
     """
     Build the set of nodes that must NOT be moved or removed.
 
     Protected categories:
       - Nodes on 1D elements (CBAR, CBEAM, CROD, CONROD, CTUBE)
+      - Nodes on connector elements (CBUSH, CELAS, CDAMP, etc.)
       - Nodes on rigid elements (RBE2, RBE3, RBAR, RROD)
       - Nodes on mass elements (CONM1, CONM2, CMASS1-4)
       - Nodes referenced by SPCs or MPCs
       - Nodes on property boundaries (shared by elements with different PIDs)
       - Nodes on mesh boundaries (edge used by only one 2D element)
+      - Nodes on geometric feature edges (adjacent element normals differ by
+        more than feature_angle degrees -- sharp corners/creases)
       - Nodes on elements with extra_protect_pids
+
+    Args:
+        node_positions: {nid: xyz} needed for feature edge detection.
+                        If None, feature edge detection is skipped.
+        feature_angle: Dihedral angle threshold in degrees (default 30).
+                       Edges where adjacent element normals differ by more
+                       than this angle are treated as geometric features.
     """
     protected: Set[int] = set()
 
@@ -228,6 +243,70 @@ def build_protected_nodes(
         if count == 1:
             protected.add(n1)
             protected.add(n2)
+
+    # --- Geometric feature edges (sharp corners/creases) ---
+    # An interior edge shared by two 2D elements is a feature edge if
+    # the dihedral angle between the element normals exceeds the threshold.
+    # All nodes on feature edges are protected to preserve sharp geometry.
+    if node_positions is not None and feature_angle > 0:
+        feature_cos = np.cos(np.radians(feature_angle))
+        feature_protected = 0
+
+        # Build edge -> list of adjacent element IDs (only for interior edges)
+        edge_elems: Dict[Tuple[int, int], List[int]] = {}
+        for eid, elem in model.elements.items():
+            if elem.type not in shell_types:
+                continue
+            nodes = [n if isinstance(n, int) else n for n in elem.nodes]
+            n_nodes = len(nodes)
+            for i in range(n_nodes):
+                e_n1, e_n2 = nodes[i], nodes[(i + 1) % n_nodes]
+                edge = (min(e_n1, e_n2), max(e_n1, e_n2))
+                if edge not in edge_elems:
+                    edge_elems[edge] = []
+                edge_elems[edge].append(eid)
+
+        # Compute element normals (reusing existing function)
+        elem_normals: Dict[int, np.ndarray] = {}
+        for eid, elem in model.elements.items():
+            if elem.type not in shell_types:
+                continue
+            nodes = [n if isinstance(n, int) else n for n in elem.nodes]
+            positions = [node_positions[n] for n in nodes
+                        if n in node_positions]
+            if len(positions) >= 3:
+                v1 = positions[1] - positions[0]
+                v2 = positions[2] - positions[0]
+                cross = np.cross(v1, v2)
+                mag = np.linalg.norm(cross)
+                if mag > 1e-15:
+                    elem_normals[eid] = cross / mag
+                else:
+                    elem_normals[eid] = np.array([0.0, 0.0, 0.0])
+
+        # Check each interior edge for feature angle
+        for (e_n1, e_n2), eids in edge_elems.items():
+            if len(eids) != 2:
+                continue
+            eid_a, eid_b = eids[0], eids[1]
+            if eid_a not in elem_normals or eid_b not in elem_normals:
+                continue
+            norm_a = elem_normals[eid_a]
+            norm_b = elem_normals[eid_b]
+            if np.linalg.norm(norm_a) < 1e-15 or np.linalg.norm(norm_b) < 1e-15:
+                continue
+            cos_angle = np.dot(norm_a, norm_b)
+            if cos_angle < feature_cos:
+                if e_n1 not in protected:
+                    feature_protected += 1
+                if e_n2 not in protected:
+                    feature_protected += 1
+                protected.add(e_n1)
+                protected.add(e_n2)
+
+        if feature_protected > 0:
+            logger.debug(f"Feature edge detection: {feature_protected} "
+                        f"additional nodes protected (angle > {feature_angle} deg)")
 
     return protected
 
@@ -1234,6 +1313,7 @@ def coarsen_mesh(
     min_quality: float = 0.1,
     max_normal_dev: float = 15.0,
     max_chord_dev: float = 0.0,
+    feature_angle: float = 30.0,
     do_fill_holes: bool = False,
     punch: bool = False,
     verbose: bool = False,
@@ -1254,6 +1334,10 @@ def coarsen_mesh(
                         from original surface (default: 15.0). Set to 0 to disable.
         max_chord_dev: Maximum allowed centroid departure distance from original
                        surface (default: 0 = auto, target_min / 3).
+        feature_angle: Dihedral angle threshold in degrees for feature edge
+                       detection (default: 30). Nodes on edges where adjacent
+                       element normals differ by more than this are protected.
+                       Set to 0 to disable.
         do_fill_holes: Detect and collapse interior holes, removing RBE wagon wheels
         punch: Read in punch mode
         verbose: Verbose logging
@@ -1333,7 +1417,11 @@ def coarsen_mesh(
     extra_protect = set(protect_pids) if protect_pids else None
 
     # Build protected node set
-    protected = build_protected_nodes(model, eligible_pids, extra_protect)
+    protected = build_protected_nodes(
+        model, eligible_pids, extra_protect,
+        node_positions=node_positions,
+        feature_angle=feature_angle,
+    )
     logger.info(f"Protected nodes: {len(protected)}")
 
     # Build connectivity maps
@@ -1586,6 +1674,11 @@ Examples:
                         help='Max centroid departure from original surface '
                              '(default: 0 = auto, target-min / 3). '
                              'Prevents chord shortcutting across curves.')
+    parser.add_argument('--feature-angle', type=float, default=30.0,
+                        help='Dihedral angle threshold in degrees for protecting '
+                             'sharp corners/creases (default: 30). Nodes on edges '
+                             'where adjacent normals differ by more than this are '
+                             'locked in place. Set to 0 to disable.')
     parser.add_argument('--fill-holes', action='store_true',
                         help='Detect and collapse interior holes, removing RBE wagon wheels')
     parser.add_argument('--mass-factor', type=float, default=386.4,
@@ -1625,6 +1718,7 @@ Examples:
             min_quality=args.min_quality,
             max_normal_dev=args.max_normal_dev,
             max_chord_dev=args.max_chord_dev,
+            feature_angle=args.feature_angle,
             do_fill_holes=args.fill_holes,
             punch=args.punch,
             verbose=args.verbose,

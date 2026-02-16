@@ -27,6 +27,8 @@ OPTIONS:
     --feature-angle   Dihedral angle threshold for protecting sharp corners/creases
                       (default: 30 degrees). Nodes on edges where adjacent element
                       normals differ by more than this are locked in place.
+    --max-warp        Maximum allowed quad warp angle in degrees (default: 10).
+                      Rejects collapses that would create warped CQUAD4 elements.
     --punch           Read BDF in punch mode
     --verbose, -v     Enable verbose logging
 
@@ -533,11 +535,69 @@ def compute_tri_area_normal(p1: np.ndarray, p2: np.ndarray, p3: np.ndarray):
     return area, normal
 
 
-def compute_element_quality(node_positions: Dict[int, np.ndarray], node_ids: List[int]) -> float:
+def compute_quad_warp_angle(p0: np.ndarray, p1: np.ndarray,
+                            p2: np.ndarray, p3: np.ndarray) -> float:
     """
-    Compute a simple quality metric for a 2D element.
-    Returns a value between 0 (degenerate) and 1 (perfect).
-    Uses aspect ratio: min_edge / max_edge.
+    Compute the warp angle of a CQUAD4 in degrees.
+
+    Warp is the angle between the normals of the two triangles formed by
+    splitting the quad along each diagonal.  A perfectly planar quad has
+    warp = 0.  Nastran typically fails elements with warp > 10-15 degrees.
+    """
+    # Split along diagonal 0-2
+    n1_a = np.cross(p1 - p0, p2 - p0)
+    n1_b = np.cross(p2 - p0, p3 - p0)
+    mag_a = np.linalg.norm(n1_a)
+    mag_b = np.linalg.norm(n1_b)
+    if mag_a < 1e-15 or mag_b < 1e-15:
+        return 180.0
+    cos1 = np.clip(np.dot(n1_a / mag_a, n1_b / mag_b), -1.0, 1.0)
+
+    # Split along diagonal 1-3
+    n2_a = np.cross(p2 - p1, p3 - p1)
+    n2_b = np.cross(p3 - p1, p0 - p1)
+    mag_a = np.linalg.norm(n2_a)
+    mag_b = np.linalg.norm(n2_b)
+    if mag_a < 1e-15 or mag_b < 1e-15:
+        return 180.0
+    cos2 = np.clip(np.dot(n2_a / mag_a, n2_b / mag_b), -1.0, 1.0)
+
+    # Warp angle is the worst of the two diagonals
+    warp1 = np.degrees(np.arccos(cos1))
+    warp2 = np.degrees(np.arccos(cos2))
+    return max(warp1, warp2)
+
+
+def compute_interior_angles(positions: List[np.ndarray]) -> List[float]:
+    """Compute interior angles (degrees) at each vertex of a polygon."""
+    n = len(positions)
+    angles = []
+    for i in range(n):
+        v_prev = positions[(i - 1) % n] - positions[i]
+        v_next = positions[(i + 1) % n] - positions[i]
+        mag_prev = np.linalg.norm(v_prev)
+        mag_next = np.linalg.norm(v_next)
+        if mag_prev < 1e-15 or mag_next < 1e-15:
+            angles.append(0.0)
+            continue
+        cos_a = np.clip(np.dot(v_prev, v_next) / (mag_prev * mag_next),
+                        -1.0, 1.0)
+        angles.append(np.degrees(np.arccos(cos_a)))
+    return angles
+
+
+def compute_element_quality(node_positions: Dict[int, np.ndarray],
+                            node_ids: List[int],
+                            max_warp: float = 10.0) -> float:
+    """
+    Compute a quality metric for a 2D element.
+    Returns a value between 0 (degenerate/unacceptable) and 1 (perfect).
+
+    Checks:
+      - Aspect ratio: min_edge / max_edge
+      - Interior angles: no angle < 10 deg or > 170 deg (tri) / > 160 deg (quad)
+      - Warp (CQUAD4 only): non-planarity must be < max_warp degrees
+      - Taper (CQUAD4 only): ratio of areas of triangles formed by diagonals
     """
     if len(node_ids) < 3:
         return 0.0
@@ -545,6 +605,7 @@ def compute_element_quality(node_positions: Dict[int, np.ndarray], node_ids: Lis
     positions = [node_positions[n] for n in node_ids]
     n = len(positions)
 
+    # Edge lengths
     edges = []
     for i in range(n):
         edge_len = np.linalg.norm(positions[(i + 1) % n] - positions[i])
@@ -552,11 +613,47 @@ def compute_element_quality(node_positions: Dict[int, np.ndarray], node_ids: Lis
 
     max_edge = max(edges)
     min_edge = min(edges)
-
     if max_edge < 1e-15:
         return 0.0
 
-    return min_edge / max_edge
+    aspect = min_edge / max_edge
+
+    # Interior angle check
+    angles = compute_interior_angles(positions)
+    min_angle = min(angles) if angles else 0.0
+    max_angle = max(angles) if angles else 180.0
+
+    if min_angle < 5.0:
+        return 0.0
+
+    if n == 3:
+        # Triangle: reject if any angle > 170 deg
+        if max_angle > 170.0:
+            return 0.0
+    elif n == 4:
+        # Quad: reject if any angle > 160 deg or < 10 deg
+        if max_angle > 160.0 or min_angle < 10.0:
+            return 0.0
+
+        # Warp check (quad only)
+        warp = compute_quad_warp_angle(positions[0], positions[1],
+                                       positions[2], positions[3])
+        if warp > max_warp:
+            return 0.0
+
+        # Taper check: ratio of areas of two triangles from each diagonal
+        area_a, _ = compute_tri_area_normal(positions[0], positions[1],
+                                             positions[2])
+        area_b, _ = compute_tri_area_normal(positions[0], positions[2],
+                                             positions[3])
+        if area_a > 1e-15 and area_b > 1e-15:
+            taper = min(area_a, area_b) / max(area_a, area_b)
+            if taper < 0.1:
+                return 0.0
+        else:
+            return 0.0
+
+    return aspect
 
 
 def check_collapse_quality(
@@ -571,6 +668,7 @@ def check_collapse_quality(
     surface_kdtree: Optional[KDTree] = None,
     max_normal_dev_cos: float = -1.0,
     max_chord_dev: float = 0.0,
+    max_warp: float = 10.0,
 ) -> str:
     """
     Check if collapsing n_remove into n_keep would produce acceptable elements.
@@ -621,7 +719,8 @@ def check_collapse_quality(
         if len(new_nodes) >= 3:
             if not all(n in node_positions for n in new_nodes):
                 return "quality"
-            quality = compute_element_quality(node_positions, new_nodes)
+            quality = compute_element_quality(node_positions, new_nodes,
+                                                max_warp=max_warp)
             if quality < min_quality:
                 return "quality"
 
@@ -1392,6 +1491,7 @@ def coarsen_mesh(
     max_normal_dev: float = 15.0,
     max_chord_dev: float = 0.0,
     feature_angle: float = 30.0,
+    max_warp: float = 10.0,
     do_fill_holes: bool = False,
     punch: bool = False,
     verbose: bool = False,
@@ -1416,6 +1516,8 @@ def coarsen_mesh(
                        detection (default: 30). Nodes on edges where adjacent
                        element normals differ by more than this are protected.
                        Set to 0 to disable.
+        max_warp: Maximum allowed quad warp angle in degrees (default: 10).
+                  Rejects collapses that would create warped quads.
         do_fill_holes: Detect and collapse interior holes, removing RBE wagon wheels
         punch: Read in punch mode
         verbose: Verbose logging
@@ -1483,6 +1585,7 @@ def coarsen_mesh(
     logger.info(f"Max normal deviation: {max_normal_dev:.1f} deg "
                 f"(cos threshold={max_normal_dev_cos:.4f})")
     logger.info(f"Max chord deviation: {max_chord_dev:.4f}")
+    logger.info(f"Max quad warp angle: {max_warp:.1f} deg")
 
     # Fill holes BEFORE coarsening (so collapsed hole nodes don't interfere)
     hole_stats = {}
@@ -1595,6 +1698,7 @@ def coarsen_mesh(
             surface_kdtree=surface_kdtree,
             max_normal_dev_cos=max_normal_dev_cos,
             max_chord_dev=max_chord_dev,
+            max_warp=max_warp,
         )
         if collapse_result != "ok":
             stats[f'skipped_{collapse_result}'] += 1
@@ -1757,6 +1861,10 @@ Examples:
                              'sharp corners/creases (default: 30). Nodes on edges '
                              'where adjacent normals differ by more than this are '
                              'locked in place. Set to 0 to disable.')
+    parser.add_argument('--max-warp', type=float, default=10.0,
+                        help='Maximum allowed quad warp angle in degrees '
+                             '(default: 10). Rejects collapses that would create '
+                             'warped CQUAD4 elements.')
     parser.add_argument('--fill-holes', action='store_true',
                         help='Detect and collapse interior holes, removing RBE wagon wheels')
     parser.add_argument('--mass-factor', type=float, default=386.4,
@@ -1797,6 +1905,7 @@ Examples:
             max_normal_dev=args.max_normal_dev,
             max_chord_dev=args.max_chord_dev,
             feature_angle=args.feature_angle,
+            max_warp=args.max_warp,
             do_fill_holes=args.fill_holes,
             punch=args.punch,
             verbose=args.verbose,

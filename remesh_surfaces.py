@@ -599,6 +599,7 @@ def remesh_patch(
     target_length: float,
     prefer_quads: bool = True,
     pid: int = 1,
+    global_boundary_nodes: Optional[Set[int]] = None,
 ) -> Tuple[Dict[int, np.ndarray], List[Tuple[str, int, List[int]]], int]:
     """Remesh a single patch by decimating the existing mesh.
 
@@ -641,6 +642,10 @@ def remesh_patch(
         if cnt == 1:
             boundary_nids.add(n1)
             boundary_nids.add(n2)
+
+    # Also include global boundary nodes (feature edges, PID boundaries, free edges)
+    if global_boundary_nodes:
+        boundary_nids |= (global_boundary_nodes & set(local_nodes.keys()))
 
     # Nodes that cannot be removed: boundary + pinned
     locked = boundary_nids | (pinned & set(local_nodes.keys()))
@@ -698,8 +703,30 @@ def remesh_patch(
             else:
                 n_keep, n_remove = n2, n1
 
-        # Update elements: replace n_remove with n_keep
+        # Check: would this collapse remove any element that touches a
+        # boundary node?  If so, skip — it could erode the patch outline.
+        would_harm_boundary = False
         affected = list(n2e.get(n_remove, set()))
+        for eid in affected:
+            if eid in removed_elems or eid not in local_elems:
+                continue
+            nodes = local_elems[eid]
+            new_nodes_list = [n_keep if n == n_remove else n for n in nodes]
+            unique = []
+            for n in new_nodes_list:
+                if n not in unique:
+                    unique.append(n)
+            if len(unique) < 3:
+                # Element would be removed — reject if ANY of its nodes
+                # are boundary nodes (preserves the full boundary ring)
+                if any(n in boundary_nids for n in nodes):
+                    would_harm_boundary = True
+                    break
+
+        if would_harm_boundary:
+            continue
+
+        # Update elements: replace n_remove with n_keep
         for eid in affected:
             if eid in removed_elems or eid not in local_elems:
                 continue
@@ -1023,6 +1050,22 @@ def remesh_surfaces(
 
     logger.info(f"Nodes: {len(model.nodes)}, Elements: {len(model.elements)}")
 
+    # Capture original boundary nodes BEFORE hole filling
+    orig_edge_count: Dict[Edge, int] = {}
+    for eid, elem in model.elements.items():
+        if elem.type not in SHELL_TYPES:
+            continue
+        nodes = _elem_nodes(elem)
+        for i in range(len(nodes)):
+            e = _edge(nodes[i], nodes[(i + 1) % len(nodes)])
+            orig_edge_count[e] = orig_edge_count.get(e, 0) + 1
+    original_boundary_nodes: Set[int] = set()
+    for (n1, n2), cnt in orig_edge_count.items():
+        if cnt == 1:
+            original_boundary_nodes.add(n1)
+            original_boundary_nodes.add(n2)
+    logger.info(f"Original boundary nodes: {len(original_boundary_nodes)}")
+
     # ── Step 0: fill holes ──
     # Interior holes create T-junctions that prevent clean boundary loops.
     # Fill each hole with triangles so the surface becomes watertight.
@@ -1041,6 +1084,12 @@ def remesh_surfaces(
         hole_fill_eids=hole_fill_eids,
     )
     boundary_edges = free_edges | feature_edges | pid_boundary_edges
+    # All nodes on any non-interior edge PLUS original boundary nodes
+    # (hole boundaries that became interior after filling)
+    global_boundary_nodes: Set[int] = set(original_boundary_nodes)
+    for n1, n2 in boundary_edges:
+        global_boundary_nodes.add(n1)
+        global_boundary_nodes.add(n2)
     logger.info(f"  Free edges: {len(free_edges)}")
     logger.info(f"  Feature edges: {len(feature_edges)}")
     logger.info(f"  PID boundary edges: {len(pid_boundary_edges)}")
@@ -1118,6 +1167,7 @@ def remesh_surfaces(
         new_nodes, new_elems, _ = remesh_patch(
             patch, elem_nodes_map, node_positions, edge_elems,
             pinned, target_length, prefer_quads, patch_pid,
+            global_boundary_nodes=global_boundary_nodes,
         )
 
         if not new_elems:
@@ -1148,6 +1198,11 @@ def remesh_surfaces(
             all_new_elems.append((etype, epid, mapped))
 
         patches_remeshed += 1
+
+    # Ensure ALL global boundary nodes are in the output — they define the geometry
+    for nid in global_boundary_nodes:
+        if nid not in all_new_nodes and nid in node_positions:
+            all_new_nodes[nid] = node_positions[nid].copy()
 
     logger.info(f"Remeshed {patches_remeshed} patches, kept {patches_kept} as-is")
     logger.info(f"New mesh: {len(all_new_nodes)} nodes, {len(all_new_elems)} elements")

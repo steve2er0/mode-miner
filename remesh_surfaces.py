@@ -446,6 +446,104 @@ def visualise_patches(
     logger.info(f"Visualisation written to {output_html}")
 
 
+def visualise_result(
+    all_new_nodes: Dict[int, np.ndarray],
+    all_new_elems: List[Tuple[str, int, List[int]]],
+    pinned_nodes: Set[int],
+    output_html: str,
+):
+    """Create interactive HTML visualisation of the remeshed result."""
+    if go is None:
+        logger.warning("plotly not installed, skipping visualisation")
+        return
+
+    traces = []
+
+    # Build node index map
+    all_nids = sorted(all_new_nodes.keys())
+    nid_to_idx = {nid: i for i, nid in enumerate(all_nids)}
+    x = [all_new_nodes[n][0] for n in all_nids]
+    y = [all_new_nodes[n][1] for n in all_nids]
+    z = [all_new_nodes[n][2] for n in all_nids]
+
+    # Colour by PID
+    node_pid: Dict[int, int] = {}
+    for etype, epid, enodes in all_new_elems:
+        for n in enodes:
+            if n not in node_pid:
+                node_pid[n] = epid
+    intensity = [node_pid.get(n, 0) for n in all_nids]
+
+    # Triangulate for plotly
+    tri_i, tri_j, tri_k = [], [], []
+    for etype, epid, enodes in all_new_elems:
+        idxs = [nid_to_idx.get(n) for n in enodes]
+        if any(i is None for i in idxs):
+            continue
+        if len(idxs) >= 3:
+            tri_i.append(idxs[0]); tri_j.append(idxs[1]); tri_k.append(idxs[2])
+        if len(idxs) == 4:
+            tri_i.append(idxs[0]); tri_j.append(idxs[2]); tri_k.append(idxs[3])
+
+    hover = [f"Node {n}<br>PID {node_pid.get(n, '?')}" for n in all_nids]
+
+    traces.append(go.Mesh3d(
+        x=x, y=y, z=z,
+        i=tri_i, j=tri_j, k=tri_k,
+        intensity=intensity,
+        colorscale="Viridis",
+        opacity=0.8,
+        hovertext=hover,
+        hoverinfo="text",
+        name="Remeshed surface",
+    ))
+
+    # Element edges as wireframe
+    ex, ey, ez = [], [], []
+    for etype, epid, enodes in all_new_elems:
+        pts = [all_new_nodes.get(n) for n in enodes]
+        if any(p is None for p in pts):
+            continue
+        n = len(pts)
+        for i in range(n):
+            p1, p2 = pts[i], pts[(i + 1) % n]
+            ex += [p1[0], p2[0], None]
+            ey += [p1[1], p2[1], None]
+            ez += [p1[2], p2[2], None]
+    traces.append(go.Scatter3d(
+        x=ex, y=ey, z=ez,
+        mode="lines",
+        line=dict(color="gray", width=1),
+        name="Element edges",
+        visible="legendonly",
+    ))
+
+    # Pinned nodes
+    pn = [n for n in pinned_nodes if n in all_new_nodes]
+    if pn:
+        traces.append(go.Scatter3d(
+            x=[all_new_nodes[n][0] for n in pn],
+            y=[all_new_nodes[n][1] for n in pn],
+            z=[all_new_nodes[n][2] for n in pn],
+            mode="markers",
+            marker=dict(size=4, color="red"),
+            hovertext=[f"Pinned {n}" for n in pn],
+            hoverinfo="text",
+            name="Pinned nodes",
+        ))
+
+    n_quads = sum(1 for t, _, e in all_new_elems if t == "CQUAD4")
+    n_tris = sum(1 for t, _, e in all_new_elems if t == "CTRIA3")
+    fig = go.Figure(data=traces)
+    fig.update_layout(
+        title=f"Remeshed: {len(all_new_nodes)} nodes, "
+              f"{n_quads} quads + {n_tris} tris",
+        scene=dict(aspectmode="data"),
+    )
+    fig.write_html(output_html, auto_open=True)
+    logger.info(f"Result visualisation written to {output_html}")
+
+
 # ── Step 5: remesh with Gmsh ─────────────────────────────────────────
 
 def _order_boundary_segments(
@@ -986,6 +1084,11 @@ def remesh_surfaces(
     # ── Write ──
     logger.info(f"Writing output: {output_file}")
     out.write_bdf(output_file, size=16, is_double=False)
+
+    # ── Visualise result ──
+    result_html = os.path.splitext(output_file)[0] + "_result.html"
+    logger.info(f"Generating result visualisation: {result_html}")
+    visualise_result(all_new_nodes, all_new_elems, pinned, result_html)
 
     # ── Step 7: mass check ──
     logger.info("\n--- Mass Check ---")

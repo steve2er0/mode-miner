@@ -523,9 +523,8 @@ def visualise_result(
     traces.append(go.Scatter3d(
         x=ex, y=ey, z=ez,
         mode="lines",
-        line=dict(color="gray", width=1),
+        line=dict(color="black", width=1),
         name="Element edges",
-        visible="legendonly",
     ))
 
     # Pinned nodes

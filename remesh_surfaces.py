@@ -106,8 +106,13 @@ def classify_edges(
     node_positions: Dict[int, np.ndarray],
     elem_nodes_map: Dict[int, List[int]],
     feature_angle: float = 30.0,
+    hole_fill_eids: Optional[Set[int]] = None,
 ) -> Tuple[Set[Edge], Set[Edge], Set[Edge], Set[Edge]]:
-    """Classify every edge as free / feature / pid_boundary / interior."""
+    """Classify every edge as free / feature / pid_boundary / interior.
+
+    Edges touching hole-fill elements are always classified as interior
+    so that filled holes merge into the surrounding patch.
+    """
     feature_cos = np.cos(np.radians(feature_angle))
 
     elem_normals: Dict[int, np.ndarray] = {}
@@ -126,12 +131,17 @@ def classify_edges(
     pid_boundary: Set[Edge] = set()
     interior: Set[Edge] = set()
 
+    _fill = hole_fill_eids or set()
+
     for edge, eids in edge_elems.items():
         if len(eids) == 1:
             free.add(edge)
         elif len(eids) >= 2:
             eid_a, eid_b = eids[0], eids[1]
-            if elem_pid.get(eid_a) != elem_pid.get(eid_b):
+            # Edges touching hole-fill elements are always interior
+            if eid_a in _fill or eid_b in _fill:
+                interior.add(edge)
+            elif elem_pid.get(eid_a) != elem_pid.get(eid_b):
                 pid_boundary.add(edge)
             elif (eid_a in elem_normals and eid_b in elem_normals
                   and np.dot(elem_normals[eid_a], elem_normals[eid_b]) < feature_cos):
@@ -862,6 +872,132 @@ def calculate_total_mass(
     return total, total * mass_to_lbs_factor, per_pid
 
 
+# ── Step 0: hole filling ──────────────────────────────────────────────
+
+def _fill_holes(
+    model: BDF,
+    node_positions: Dict[int, np.ndarray],
+) -> Tuple[int, Set[int]]:
+    """Detect interior free-edge loops (holes) and fill with triangles.
+
+    A hole is a closed loop of free edges that is NOT the outer boundary.
+    The outer boundary is identified as the loop with the largest perimeter.
+
+    For each hole, creates a centroid node and fills with CTRIA3 elements
+    fanning from the centroid to each edge of the loop.  Uses PID from
+    the adjacent element.
+
+    Returns (holes_filled, set_of_fill_element_ids).
+    """
+    # Build free-edge adjacency
+    edge_count: Dict[Edge, int] = {}
+    edge_adj_elem: Dict[Edge, int] = {}
+    for eid, elem in model.elements.items():
+        if elem.type not in SHELL_TYPES:
+            continue
+        nodes = _elem_nodes(elem)
+        for i in range(len(nodes)):
+            e = _edge(nodes[i], nodes[(i + 1) % len(nodes)])
+            edge_count[e] = edge_count.get(e, 0) + 1
+            edge_adj_elem[e] = eid
+
+    free_adj: Dict[int, List[int]] = defaultdict(list)
+    free_edge_elem: Dict[Edge, int] = {}
+    for e, cnt in edge_count.items():
+        if cnt == 1:
+            free_adj[e[0]].append(e[1])
+            free_adj[e[1]].append(e[0])
+            free_edge_elem[e] = edge_adj_elem.get(e, 0)
+
+    if not free_adj:
+        return 0, set()
+
+    # Trace closed loops
+    visited: Set[int] = set()
+    loops: List[List[int]] = []
+    for start in sorted(free_adj.keys()):
+        if start in visited:
+            continue
+        loop = []
+        current = start
+        prev = None
+        while True:
+            visited.add(current)
+            loop.append(current)
+            neighbors = [n for n in free_adj[current] if n != prev and n not in visited]
+            if not neighbors:
+                # Check if we can close back to start
+                if start in free_adj[current] and len(loop) > 2:
+                    loops.append(loop)
+                break
+            nxt = neighbors[0]
+            if nxt == start and len(loop) > 2:
+                loops.append(loop)
+                break
+            prev = current
+            current = nxt
+
+    if len(loops) <= 1:
+        return 0
+
+    # Classify: largest perimeter = outer boundary, rest = holes
+    perimeters = []
+    for loop in loops:
+        perim = 0.0
+        for i in range(len(loop)):
+            n1, n2 = loop[i], loop[(i + 1) % len(loop)]
+            if n1 in node_positions and n2 in node_positions:
+                perim += float(np.linalg.norm(
+                    node_positions[n2] - node_positions[n1]))
+        perimeters.append(perim)
+
+    max_perim_idx = perimeters.index(max(perimeters))
+    holes = [(i, loop) for i, loop in enumerate(loops) if i != max_perim_idx]
+
+    if not holes:
+        return 0, set()
+
+    max_nid = max(model.nodes.keys())
+    max_eid = max(model.elements.keys())
+
+    filled = 0
+    fill_eids: Set[int] = set()
+    for _, hole_loop in holes:
+        if len(hole_loop) < 3:
+            continue
+
+        # Find PID from adjacent element
+        hole_pid = 1
+        for i in range(len(hole_loop)):
+            e = _edge(hole_loop[i], hole_loop[(i + 1) % len(hole_loop)])
+            if e in free_edge_elem and free_edge_elem[e] in model.elements:
+                adj_elem = model.elements[free_edge_elem[e]]
+                hole_pid = adj_elem.pid if isinstance(adj_elem.pid, int) else adj_elem.pid
+                break
+
+        # Fill hole by ear-clipping triangulation of the boundary polygon.
+        # This keeps all new triangles coplanar with the surrounding mesh
+        # (no centroid node that would create steep normals).
+        positions = [node_positions[n] for n in hole_loop if n in node_positions]
+        if len(positions) < 3:
+            continue
+
+        # Simple fan from first node (works for convex and mildly concave holes)
+        n0 = hole_loop[0]
+        for i in range(1, len(hole_loop) - 1):
+            n1 = hole_loop[i]
+            n2 = hole_loop[i + 1]
+            max_eid += 1
+            model.add_ctria3(max_eid, hole_pid, [n0, n1, n2])
+            fill_eids.add(max_eid)
+
+        filled += 1
+        logger.debug(f"  Filled hole: {len(hole_loop)} boundary nodes, "
+                     f"PID {hole_pid}")
+
+    return filled, fill_eids
+
+
 # ── main pipeline ─────────────────────────────────────────────────────
 
 def remesh_surfaces(
@@ -908,11 +1044,22 @@ def remesh_surfaces(
 
     logger.info(f"Nodes: {len(model.nodes)}, Elements: {len(model.elements)}")
 
+    # ── Step 0: fill holes ──
+    # Interior holes create T-junctions that prevent clean boundary loops.
+    # Fill each hole with triangles so the surface becomes watertight.
+    logger.info("Detecting and filling holes...")
+    holes_filled, hole_fill_eids = _fill_holes(model, node_positions)
+    if holes_filled > 0:
+        logger.info(f"  Filled {holes_filled} holes ({len(hole_fill_eids)} fill elements)")
+    else:
+        logger.info("  No interior holes found")
+
     # ── Step 1: edge detection ──
     logger.info("Detecting edges...")
     edge_elems, elem_nodes_map = build_edge_adjacency(model)
     free_edges, feature_edges, pid_boundary_edges, interior_edges = classify_edges(
-        edge_elems, model, node_positions, elem_nodes_map, feature_angle
+        edge_elems, model, node_positions, elem_nodes_map, feature_angle,
+        hole_fill_eids=hole_fill_eids,
     )
     boundary_edges = free_edges | feature_edges | pid_boundary_edges
     logger.info(f"  Free edges: {len(free_edges)}")

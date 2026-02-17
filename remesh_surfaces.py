@@ -1235,22 +1235,6 @@ def remesh_surfaces(
 
     logger.info(f"Nodes: {len(model.nodes)}, Elements: {len(model.elements)}")
 
-    # Capture original boundary nodes BEFORE hole filling
-    orig_edge_count: Dict[Edge, int] = {}
-    for eid, elem in model.elements.items():
-        if elem.type not in SHELL_TYPES:
-            continue
-        nodes = _elem_nodes(elem)
-        for i in range(len(nodes)):
-            e = _edge(nodes[i], nodes[(i + 1) % len(nodes)])
-            orig_edge_count[e] = orig_edge_count.get(e, 0) + 1
-    original_boundary_nodes: Set[int] = set()
-    for (n1, n2), cnt in orig_edge_count.items():
-        if cnt == 1:
-            original_boundary_nodes.add(n1)
-            original_boundary_nodes.add(n2)
-    logger.info(f"Original boundary nodes: {len(original_boundary_nodes)}")
-
     # ── Step 0: fill holes ──
     # Interior holes create T-junctions that prevent clean boundary loops.
     # Fill each hole with triangles so the surface becomes watertight.
@@ -1269,9 +1253,8 @@ def remesh_surfaces(
         hole_fill_eids=hole_fill_eids,
     )
     boundary_edges = free_edges | feature_edges | pid_boundary_edges
-    # All nodes on any non-interior edge PLUS original boundary nodes
-    # (hole boundaries that became interior after filling)
-    global_boundary_nodes: Set[int] = set(original_boundary_nodes)
+    # All nodes on any non-interior edge (used for seeding and corner detection)
+    global_boundary_nodes: Set[int] = set()
     for n1, n2 in boundary_edges:
         global_boundary_nodes.add(n1)
         global_boundary_nodes.add(n2)
@@ -1392,8 +1375,8 @@ def remesh_surfaces(
 
         patches_remeshed += 1
 
-    # Ensure ALL global boundary nodes are in the output
-    for nid in global_boundary_nodes:
+    # Ensure pinned nodes are in the output (they define connectivity)
+    for nid in pinned:
         if nid not in all_new_nodes and nid in node_positions:
             all_new_nodes[nid] = node_positions[nid].copy()
 

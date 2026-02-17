@@ -591,32 +591,6 @@ def _order_boundary_segments(
     return result
 
 
-def _gmsh_worker(msh_in: str, msh_out: str, target: float, quads: bool):
-    """Run Gmsh remeshing in a subprocess-safe function."""
-    import gmsh as _gmsh
-    _gmsh.initialize()
-    _gmsh.option.setNumber("General.Verbosity", 0)
-    _gmsh.open(msh_in)
-
-    angle = np.radians(180)
-    _gmsh.model.mesh.classifySurfaces(angle, True, True, angle)
-    _gmsh.model.mesh.createGeometry()
-
-    for dim, tag in _gmsh.model.getEntities(0):
-        _gmsh.model.mesh.setSize([(dim, tag)], target)
-
-    if quads:
-        _gmsh.option.setNumber("Mesh.Algorithm", 8)
-        _gmsh.option.setNumber("Mesh.RecombineAll", 1)
-    else:
-        _gmsh.option.setNumber("Mesh.Algorithm", 6)
-
-    _gmsh.model.mesh.clear()
-    _gmsh.model.mesh.generate(2)
-    _gmsh.write(msh_out)
-    _gmsh.finalize()
-
-
 def remesh_patch(
     patch_eids: Set[int],
     elem_nodes_map: Dict[int, List[int]],
@@ -626,160 +600,166 @@ def remesh_patch(
     target_length: float,
     prefer_quads: bool = True,
     pid: int = 1,
-    timeout_sec: int = 60,
 ) -> Tuple[Dict[int, np.ndarray], List[Tuple[str, int, List[int]]], int]:
-    """Remesh a single patch using Gmsh in a subprocess with timeout.
+    """Remesh a single patch by decimating the existing mesh.
 
-    Strategy: write the patch as .msh v2, run Gmsh in a subprocess
-    (so we can kill it if classifySurfaces hangs), read back the result.
+    Simple edge-collapse approach: iteratively collapse the shortest
+    interior edge until all edges are >= target_length.  Boundary nodes
+    and pinned nodes are never moved.  No external mesher needed.
 
     Returns:
-        new_nodes: {temp_nid: xyz}
+        new_nodes: {nid: xyz}
         new_elems: [(type, pid, [nids])]
-        next_id: next available temp ID
+        next_id: unused
     """
-    import tempfile
-    import subprocess
     from scipy.spatial import KDTree
 
-    patch_nodes: Set[int] = set()
+    # Build local working copies
+    local_nodes: Dict[int, np.ndarray] = {}
     for eid in patch_eids:
         for n in elem_nodes_map.get(eid, []):
-            patch_nodes.add(n)
+            if n in node_positions:
+                local_nodes[n] = node_positions[n].copy()
 
-    if len(patch_nodes) < 3:
-        return {}, [], 0
-
-    nid_list = sorted(patch_nodes)
-    nid_to_local = {nid: i + 1 for i, nid in enumerate(nid_list)}
-
-    # Triangulate patch for Gmsh input
-    tris = []
+    local_elems: Dict[int, List[int]] = {}
     for eid in patch_eids:
         nodes = elem_nodes_map.get(eid, [])
-        local = [nid_to_local.get(n) for n in nodes]
-        if any(l is None for l in local):
-            continue
-        if len(local) == 3:
-            tris.append(local)
-        elif len(local) == 4:
-            tris.append([local[0], local[1], local[2]])
-            tris.append([local[0], local[2], local[3]])
+        if len(nodes) >= 3:
+            local_elems[eid] = list(nodes)
 
-    if not tris:
+    if len(local_nodes) < 3:
         return {}, [], 0
 
-    # Write input .msh
-    tmp_dir = tempfile.mkdtemp(prefix="remesh_")
-    msh_in = os.path.join(tmp_dir, "in.msh")
-    msh_out = os.path.join(tmp_dir, "out.msh")
+    # Identify boundary nodes of this patch (edges used by only 1 element)
+    patch_edge_count: Dict[Edge, int] = defaultdict(int)
+    for eid, nodes in local_elems.items():
+        for i in range(len(nodes)):
+            e = _edge(nodes[i], nodes[(i + 1) % len(nodes)])
+            patch_edge_count[e] += 1
 
-    with open(msh_in, "w") as f:
-        f.write("$MeshFormat\n2.2 0 8\n$EndMeshFormat\n")
-        f.write(f"$Nodes\n{len(nid_list)}\n")
-        for nid in nid_list:
-            lid = nid_to_local[nid]
-            p = node_positions.get(nid, np.zeros(3))
-            f.write(f"{lid} {p[0]:.15g} {p[1]:.15g} {p[2]:.15g}\n")
-        f.write("$EndNodes\n")
-        f.write(f"$Elements\n{len(tris)}\n")
-        for i, tri in enumerate(tris):
-            f.write(f"{i+1} 2 0 {tri[0]} {tri[1]} {tri[2]}\n")
-        f.write("$EndElements\n")
+    boundary_nids: Set[int] = set()
+    for (n1, n2), cnt in patch_edge_count.items():
+        if cnt == 1:
+            boundary_nids.add(n1)
+            boundary_nids.add(n2)
 
-    # Run Gmsh in a subprocess with timeout
-    script = f"""
-import sys, numpy as np
-sys.path.insert(0, {repr(os.path.dirname(os.path.abspath(__file__)))})
-from remesh_surfaces import _gmsh_worker
-_gmsh_worker({repr(msh_in)}, {repr(msh_out)}, {target_length}, {prefer_quads})
-"""
-    try:
-        result = subprocess.run(
-            [sys.executable, "-c", script],
-            timeout=timeout_sec,
-            capture_output=True,
-        )
-        if result.returncode != 0 or not os.path.exists(msh_out):
-            logger.debug(f"    Gmsh subprocess failed: {result.stderr.decode()[:200]}")
-            _cleanup_tmp(tmp_dir)
-            return {}, [], 0
-    except subprocess.TimeoutExpired:
-        logger.debug(f"    Gmsh timed out after {timeout_sec}s")
-        _cleanup_tmp(tmp_dir)
-        return {}, [], 0
+    # Nodes that cannot be removed: boundary + pinned
+    locked = boundary_nids | (pinned & set(local_nodes.keys()))
 
-    # Read back the remeshed .msh
-    gmsh.initialize()
-    gmsh.option.setNumber("General.Verbosity", 0)
-    try:
-        gmsh.open(msh_out)
-    except Exception as e:
-        logger.debug(f"    Could not read Gmsh output: {e}")
-        gmsh.finalize()
-        _cleanup_tmp(tmp_dir)
-        return {}, [], 0
+    # Build node-to-elements map
+    n2e: Dict[int, Set[int]] = defaultdict(set)
+    for eid, nodes in local_elems.items():
+        for n in nodes:
+            n2e[n].add(eid)
 
-    _cleanup_tmp(tmp_dir)
+    removed_nodes: Set[int] = set()
+    removed_elems: Set[int] = set()
 
-    node_tags_out, coords_out, _ = gmsh.model.mesh.getNodes()
-    if len(coords_out) == 0:
-        gmsh.finalize()
-        return {}, [], 0
-    coords_out = coords_out.reshape(-1, 3)
-
-    new_nodes: Dict[int, np.ndarray] = {}
-    gmsh_to_nid: Dict[int, int] = {}
-
-    orig_pts = np.array([node_positions[n] for n in nid_list])
-    orig_tree = KDTree(orig_pts)
-
-    temp_id = max(node_positions.keys()) + 100000
-    used_orig: Set[int] = set()
-    for i, gt in enumerate(node_tags_out):
-        gt = int(gt)
-        pos = coords_out[i]
-        dist, idx = orig_tree.query(pos)
-        if dist < target_length * 0.05:
-            orig_nid = nid_list[idx]
-            if orig_nid not in used_orig:
-                gmsh_to_nid[gt] = orig_nid
-                new_nodes[orig_nid] = node_positions[orig_nid].copy()
-                used_orig.add(orig_nid)
+    # Build a min-heap of (length, n1, n2) for edges shorter than target
+    import heapq
+    heap: List[Tuple[float, int, int]] = []
+    seen_edges: Set[Edge] = set()
+    for eid, nodes in local_elems.items():
+        for i in range(len(nodes)):
+            e = _edge(nodes[i], nodes[(i + 1) % len(nodes)])
+            if e in seen_edges:
                 continue
-        temp_id += 1
-        gmsh_to_nid[gt] = temp_id
-        new_nodes[temp_id] = pos.copy()
+            seen_edges.add(e)
+            n1, n2 = e
+            if n1 in locked and n2 in locked:
+                continue
+            if n1 in local_nodes and n2 in local_nodes:
+                d = float(np.linalg.norm(local_nodes[n2] - local_nodes[n1]))
+                if d < target_length:
+                    heapq.heappush(heap, (d, n1, n2))
+
+    while heap:
+        best_len, n1, n2 = heapq.heappop(heap)
+
+        if n1 in removed_nodes or n2 in removed_nodes:
+            continue
+        if n1 not in local_nodes or n2 not in local_nodes:
+            continue
+
+        # Recheck length (may have changed)
+        d = float(np.linalg.norm(local_nodes[n2] - local_nodes[n1]))
+        if d >= target_length:
+            continue
+        if n1 in locked and n2 in locked:
+            continue
+        # Decide which to keep
+        if n1 in locked:
+            n_keep, n_remove = n1, n2
+        elif n2 in locked:
+            n_keep, n_remove = n2, n1
+        else:
+            # Keep the one with more connections
+            if len(n2e.get(n1, set()) - removed_elems) >= len(n2e.get(n2, set()) - removed_elems):
+                n_keep, n_remove = n1, n2
+            else:
+                n_keep, n_remove = n2, n1
+
+        # Update elements: replace n_remove with n_keep
+        affected = list(n2e.get(n_remove, set()))
+        for eid in affected:
+            if eid in removed_elems or eid not in local_elems:
+                continue
+            nodes = local_elems[eid]
+            new_nodes_list = [n_keep if n == n_remove else n for n in nodes]
+
+            # Check for degenerate
+            unique = []
+            for n in new_nodes_list:
+                if n not in unique:
+                    unique.append(n)
+
+            if len(unique) < 3:
+                removed_elems.add(eid)
+                continue
+
+            local_elems[eid] = unique if len(nodes) == 4 and len(unique) == 3 else new_nodes_list
+            n2e[n_keep].add(eid)
+
+        removed_nodes.add(n_remove)
+        if n_remove in n2e:
+            del n2e[n_remove]
+
+        # Add new edges from n_keep to the heap
+        for eid in n2e.get(n_keep, set()):
+            if eid in removed_elems or eid not in local_elems:
+                continue
+            nodes = local_elems[eid]
+            for i in range(len(nodes)):
+                en1, en2 = nodes[i], nodes[(i + 1) % len(nodes)]
+                if en1 in removed_nodes or en2 in removed_nodes:
+                    continue
+                if en1 in locked and en2 in locked:
+                    continue
+                if en1 in local_nodes and en2 in local_nodes:
+                    ed = float(np.linalg.norm(
+                        local_nodes[en2] - local_nodes[en1]))
+                    if ed < target_length:
+                        heapq.heappush(heap, (ed, min(en1, en2),
+                                              max(en1, en2)))
+
+    # Build output
+    new_nodes: Dict[int, np.ndarray] = {}
+    for nid, pos in local_nodes.items():
+        if nid not in removed_nodes:
+            new_nodes[nid] = pos
 
     new_elems: List[Tuple[str, int, List[int]]] = []
-    elem_types_out, elem_tags_out, elem_node_tags_out = gmsh.model.mesh.getElements(2)
-    for etype, etags, entags in zip(elem_types_out, elem_tags_out, elem_node_tags_out):
-        if etype == 2:
-            nodes_per = 3
-        elif etype == 3:
-            nodes_per = 4
-        else:
+    for eid, nodes in local_elems.items():
+        if eid in removed_elems:
             continue
-        entags_list = entags.tolist()
-        for j in range(len(etags)):
-            enodes = [gmsh_to_nid.get(int(entags_list[j * nodes_per + k]))
-                      for k in range(nodes_per)]
-            if any(n is None for n in enodes):
-                continue
-            etype_name = "CTRIA3" if nodes_per == 3 else "CQUAD4"
-            new_elems.append((etype_name, pid, enodes))
+        # Filter removed nodes from element
+        live = [n for n in nodes if n not in removed_nodes]
+        if len(live) == 3:
+            new_elems.append(("CTRIA3", pid, live))
+        elif len(live) == 4:
+            new_elems.append(("CQUAD4", pid, live))
 
-    gmsh.finalize()
-    return new_nodes, new_elems, temp_id
-
-
-def _cleanup_tmp(tmp_dir: str):
-    """Remove temporary directory and its contents."""
-    import shutil
-    try:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-    except Exception:
-        pass
+    return new_nodes, new_elems, 0
 
 
 # ── Step 6: reattach connections ──────────────────────────────────────

@@ -267,7 +267,11 @@ def extract_patch_boundary_loops(
     elem_nodes_map: Dict[int, List[int]],
     edge_elems: Dict[Edge, List[int]],
 ) -> List[List[int]]:
-    """Extract ordered boundary loops for a single patch."""
+    """Extract ordered boundary loops for a single patch.
+
+    Handles T-junctions (nodes with 3+ boundary edges) by tracing each
+    available path and closing loops when possible.
+    """
     patch_edges: Dict[Edge, int] = defaultdict(int)
     for eid in patch_eids:
         nodes = elem_nodes_map.get(eid, [])
@@ -290,25 +294,41 @@ def extract_patch_boundary_loops(
 
     visited_edges: Set[Edge] = set()
     loops: List[List[int]] = []
-    for start in adj:
-        if all(_edge(start, nb) in visited_edges for nb in adj[start]):
-            continue
-        loop = [start]
-        prev = None
-        current = start
-        while True:
-            neighbors = [nb for nb in adj[current]
-                         if _edge(current, nb) not in visited_edges and nb != prev]
-            if not neighbors:
-                break
-            nxt = neighbors[0]
-            visited_edges.add(_edge(current, nxt))
-            if nxt == start and len(loop) > 2:
+
+    # Try to trace closed loops, handling T-junctions by always picking
+    # an unvisited edge.  Start from degree-2 nodes first (simple boundary),
+    # then T-junctions.
+    start_order = sorted(adj.keys(),
+                         key=lambda n: (len(adj[n]) != 2, n))
+
+    for start in start_order:
+        # Try each unvisited edge from this start node
+        for first_nbr in adj[start]:
+            if _edge(start, first_nbr) in visited_edges:
+                continue
+
+            loop = [start]
+            visited_edges.add(_edge(start, first_nbr))
+            prev = start
+            current = first_nbr
+
+            while current != start:
+                loop.append(current)
+                # Pick an unvisited edge from current
+                next_node = None
+                for nb in adj[current]:
+                    if _edge(current, nb) not in visited_edges:
+                        next_node = nb
+                        break
+                if next_node is None:
+                    break
+                visited_edges.add(_edge(current, next_node))
+                prev = current
+                current = next_node
+
+            if current == start and len(loop) >= 3:
                 loops.append(loop)
-                break
-            loop.append(nxt)
-            prev = current
-            current = nxt
+
     return loops
 
 
@@ -463,6 +483,32 @@ def _order_boundary_segments(
     return result
 
 
+def _gmsh_worker(msh_in: str, msh_out: str, target: float, quads: bool):
+    """Run Gmsh remeshing in a subprocess-safe function."""
+    import gmsh as _gmsh
+    _gmsh.initialize()
+    _gmsh.option.setNumber("General.Verbosity", 0)
+    _gmsh.open(msh_in)
+
+    angle = np.radians(180)
+    _gmsh.model.mesh.classifySurfaces(angle, True, True, angle)
+    _gmsh.model.mesh.createGeometry()
+
+    for dim, tag in _gmsh.model.getEntities(0):
+        _gmsh.model.mesh.setSize([(dim, tag)], target)
+
+    if quads:
+        _gmsh.option.setNumber("Mesh.Algorithm", 8)
+        _gmsh.option.setNumber("Mesh.RecombineAll", 1)
+    else:
+        _gmsh.option.setNumber("Mesh.Algorithm", 6)
+
+    _gmsh.model.mesh.clear()
+    _gmsh.model.mesh.generate(2)
+    _gmsh.write(msh_out)
+    _gmsh.finalize()
+
+
 def remesh_patch(
     patch_eids: Set[int],
     elem_nodes_map: Dict[int, List[int]],
@@ -472,25 +518,22 @@ def remesh_patch(
     target_length: float,
     prefer_quads: bool = True,
     pid: int = 1,
+    timeout_sec: int = 60,
 ) -> Tuple[Dict[int, np.ndarray], List[Tuple[str, int, List[int]]], int]:
-    """Remesh a single patch using Gmsh.
+    """Remesh a single patch using Gmsh in a subprocess with timeout.
 
-    Strategy: import the existing patch as a discrete surface mesh into
-    Gmsh, use classifySurfaces to recover geometry, then remesh to the
-    target element size.  This handles complex boundaries, T-junctions,
-    and curved 3D surfaces without needing clean boundary loops.
+    Strategy: write the patch as .msh v2, run Gmsh in a subprocess
+    (so we can kill it if classifySurfaces hangs), read back the result.
 
     Returns:
         new_nodes: {temp_nid: xyz}
         new_elems: [(type, pid, [nids])]
         next_id: next available temp ID
     """
-    if gmsh is None:
-        raise ImportError("gmsh is required for remeshing. pip install gmsh")
-
     import tempfile
+    import subprocess
+    from scipy.spatial import KDTree
 
-    # Collect patch nodes and build local index
     patch_nodes: Set[int] = set()
     for eid in patch_eids:
         for n in elem_nodes_map.get(eid, []):
@@ -500,96 +543,105 @@ def remesh_patch(
         return {}, [], 0
 
     nid_list = sorted(patch_nodes)
-    nid_to_local = {nid: i for i, nid in enumerate(nid_list)}
+    nid_to_local = {nid: i + 1 for i, nid in enumerate(nid_list)}
 
-    # Write patch as STL for fast Gmsh import
-    with tempfile.NamedTemporaryFile(suffix=".stl", delete=False, mode="w") as f:
-        stl_path = f.name
-        f.write("solid patch\n")
-        for eid in patch_eids:
-            nodes = elem_nodes_map.get(eid, [])
-            pts = [node_positions.get(n, np.zeros(3)) for n in nodes]
-            if len(pts) >= 3:
-                normal = _elem_normal(pts)
-                # First triangle
-                f.write(f"  facet normal {normal[0]} {normal[1]} {normal[2]}\n")
-                f.write("    outer loop\n")
-                for k in range(3):
-                    f.write(f"      vertex {pts[k][0]} {pts[k][1]} {pts[k][2]}\n")
-                f.write("    endloop\n  endfacet\n")
-                if len(pts) == 4:
-                    # Second triangle for quad
-                    f.write(f"  facet normal {normal[0]} {normal[1]} {normal[2]}\n")
-                    f.write("    outer loop\n")
-                    for k in [0, 2, 3]:
-                        f.write(f"      vertex {pts[k][0]} {pts[k][1]} {pts[k][2]}\n")
-                    f.write("    endloop\n  endfacet\n")
-        f.write("endsolid patch\n")
+    # Triangulate patch for Gmsh input
+    tris = []
+    for eid in patch_eids:
+        nodes = elem_nodes_map.get(eid, [])
+        local = [nid_to_local.get(n) for n in nodes]
+        if any(l is None for l in local):
+            continue
+        if len(local) == 3:
+            tris.append(local)
+        elif len(local) == 4:
+            tris.append([local[0], local[1], local[2]])
+            tris.append([local[0], local[2], local[3]])
 
+    if not tris:
+        return {}, [], 0
+
+    # Write input .msh
+    tmp_dir = tempfile.mkdtemp(prefix="remesh_")
+    msh_in = os.path.join(tmp_dir, "in.msh")
+    msh_out = os.path.join(tmp_dir, "out.msh")
+
+    with open(msh_in, "w") as f:
+        f.write("$MeshFormat\n2.2 0 8\n$EndMeshFormat\n")
+        f.write(f"$Nodes\n{len(nid_list)}\n")
+        for nid in nid_list:
+            lid = nid_to_local[nid]
+            p = node_positions.get(nid, np.zeros(3))
+            f.write(f"{lid} {p[0]:.15g} {p[1]:.15g} {p[2]:.15g}\n")
+        f.write("$EndNodes\n")
+        f.write(f"$Elements\n{len(tris)}\n")
+        for i, tri in enumerate(tris):
+            f.write(f"{i+1} 2 0 {tri[0]} {tri[1]} {tri[2]}\n")
+        f.write("$EndElements\n")
+
+    # Run Gmsh in a subprocess with timeout
+    script = f"""
+import sys, numpy as np
+sys.path.insert(0, {repr(os.path.dirname(os.path.abspath(__file__)))})
+from remesh_surfaces import _gmsh_worker
+_gmsh_worker({repr(msh_in)}, {repr(msh_out)}, {target_length}, {prefer_quads})
+"""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            timeout=timeout_sec,
+            capture_output=True,
+        )
+        if result.returncode != 0 or not os.path.exists(msh_out):
+            logger.debug(f"    Gmsh subprocess failed: {result.stderr.decode()[:200]}")
+            _cleanup_tmp(tmp_dir)
+            return {}, [], 0
+    except subprocess.TimeoutExpired:
+        logger.debug(f"    Gmsh timed out after {timeout_sec}s")
+        _cleanup_tmp(tmp_dir)
+        return {}, [], 0
+
+    # Read back the remeshed .msh
     gmsh.initialize()
     gmsh.option.setNumber("General.Verbosity", 0)
-    gmsh.model.add("patch")
-
     try:
-        gmsh.merge(stl_path)
+        gmsh.open(msh_out)
     except Exception as e:
-        logger.warning(f"  Gmsh STL merge failed: {e}")
+        logger.debug(f"    Could not read Gmsh output: {e}")
         gmsh.finalize()
-        os.unlink(stl_path)
+        _cleanup_tmp(tmp_dir)
         return {}, [], 0
 
-    os.unlink(stl_path)
+    _cleanup_tmp(tmp_dir)
 
-    # Reclassify and remesh the imported STL surface.
-    # Use a generous angle so Gmsh treats the whole patch as one surface.
-    angle = np.radians(180)
-    gmsh.model.mesh.classifySurfaces(angle, True, True, angle)
-    gmsh.model.mesh.createGeometry()
-
-    # Retrieve all surfaces created and set mesh size on their points
-    surfs = gmsh.model.getEntities(2)
-    for dim, tag in gmsh.model.getEntities(0):
-        gmsh.model.mesh.setSize([(dim, tag)], target_length)
-
-    if prefer_quads:
-        gmsh.option.setNumber("Mesh.Algorithm", 8)
-        gmsh.option.setNumber("Mesh.RecombineAll", 1)
-    else:
-        gmsh.option.setNumber("Mesh.Algorithm", 6)
-
-    gmsh.model.mesh.clear()
-
-    try:
-        gmsh.model.mesh.generate(2)
-    except Exception as e:
-        logger.warning(f"  Gmsh meshing failed: {e}")
-        gmsh.finalize()
-        return {}, [], 0
-
-    # Extract new mesh
     node_tags_out, coords_out, _ = gmsh.model.mesh.getNodes()
+    if len(coords_out) == 0:
+        gmsh.finalize()
+        return {}, [], 0
     coords_out = coords_out.reshape(-1, 3)
 
     new_nodes: Dict[int, np.ndarray] = {}
     gmsh_to_nid: Dict[int, int] = {}
 
-    from scipy.spatial import KDTree
-    orig_pts = np.array([node_positions[nid] for nid in nid_list])
+    orig_pts = np.array([node_positions[n] for n in nid_list])
     orig_tree = KDTree(orig_pts)
 
     temp_id = max(node_positions.keys()) + 100000
-    for i, gtag in enumerate(node_tags_out):
-        gtag = int(gtag)
+    used_orig: Set[int] = set()
+    for i, gt in enumerate(node_tags_out):
+        gt = int(gt)
         pos = coords_out[i]
         dist, idx = orig_tree.query(pos)
-        if dist < target_length * 0.01:
+        if dist < target_length * 0.05:
             orig_nid = nid_list[idx]
-            gmsh_to_nid[gtag] = orig_nid
-            new_nodes[orig_nid] = node_positions[orig_nid].copy()
-        else:
-            temp_id += 1
-            gmsh_to_nid[gtag] = temp_id
-            new_nodes[temp_id] = pos.copy()
+            if orig_nid not in used_orig:
+                gmsh_to_nid[gt] = orig_nid
+                new_nodes[orig_nid] = node_positions[orig_nid].copy()
+                used_orig.add(orig_nid)
+                continue
+        temp_id += 1
+        gmsh_to_nid[gt] = temp_id
+        new_nodes[temp_id] = pos.copy()
 
     new_elems: List[Tuple[str, int, List[int]]] = []
     elem_types_out, elem_tags_out, elem_node_tags_out = gmsh.model.mesh.getElements(2)
@@ -611,6 +663,15 @@ def remesh_patch(
 
     gmsh.finalize()
     return new_nodes, new_elems, temp_id
+
+
+def _cleanup_tmp(tmp_dir: str):
+    """Remove temporary directory and its contents."""
+    import shutil
+    try:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    except Exception:
+        pass
 
 
 # ── Step 6: reattach connections ──────────────────────────────────────
@@ -815,10 +876,8 @@ def remesh_surfaces(
     patches_remeshed = 0
     patches_kept = 0
 
-    MAX_PATCH_ELEMS = 200  # Patches larger than this are kept as-is (Gmsh is slow on large patches)
-
     for pidx, (patch, patch_pid) in enumerate(zip(patches, patch_pids)):
-        if (pid_filter and patch_pid not in pid_filter) or len(patch) > MAX_PATCH_ELEMS:
+        if pid_filter and patch_pid not in pid_filter:
             # Keep original elements
             for eid in patch:
                 nodes = elem_nodes_map.get(eid, [])

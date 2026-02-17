@@ -590,6 +590,204 @@ def _order_boundary_segments(
     return result
 
 
+def seed_segment(
+    segment: List[int],
+    node_positions: Dict[int, np.ndarray],
+    target_length: float,
+    pinned: Set[int],
+    next_nid_ref: List[int],
+) -> Tuple[List[int], Dict[int, np.ndarray]]:
+    """Redistribute GRIDs along a boundary segment at target spacing.
+
+    Pinned nodes within the segment are kept at their exact positions.
+    New GRIDs are placed ON the original polyline by linear interpolation.
+
+    Args:
+        segment: ordered list of original node IDs [corner_A, ..., corner_B]
+        next_nid_ref: mutable [int] for allocating new node IDs
+
+    Returns:
+        (seeded_nids, new_node_positions)
+        seeded_nids starts with segment[0] and ends with segment[-1].
+    """
+    if len(segment) < 2:
+        return list(segment), {}
+
+    # Compute cumulative arc length along the polyline
+    cum_len = [0.0]
+    for i in range(1, len(segment)):
+        p0 = node_positions[segment[i - 1]]
+        p1 = node_positions[segment[i]]
+        cum_len.append(cum_len[-1] + float(np.linalg.norm(p1 - p0)))
+
+    total_len = cum_len[-1]
+    if total_len < 1e-12:
+        return [segment[0], segment[-1]], {}
+
+    # How many intervals?
+    n_intervals = max(1, round(total_len / target_length))
+
+    # Collect pinned nodes with their arc-length positions (excluding endpoints)
+    pinned_positions = []
+    for i, nid in enumerate(segment):
+        if nid in pinned and i != 0 and i != len(segment) - 1:
+            pinned_positions.append((cum_len[i], nid))
+
+    # Build target arc-length positions: evenly spaced + pinned
+    target_s = [total_len * k / n_intervals for k in range(n_intervals + 1)]
+
+    # Insert pinned positions and remove nearby targets
+    for s_pin, nid_pin in pinned_positions:
+        # Remove any target within 0.3 * target_length of this pinned node
+        target_s = [s for s in target_s
+                    if abs(s - s_pin) > 0.3 * target_length
+                    or s == 0.0 or s == total_len]
+        target_s.append(s_pin)
+    target_s = sorted(set(target_s))
+
+    # Ensure endpoints are present
+    if target_s[0] != 0.0:
+        target_s.insert(0, 0.0)
+    if target_s[-1] != total_len:
+        target_s.append(total_len)
+
+    # Interpolate positions along the original polyline
+    seeded_nids: List[int] = []
+    new_positions: Dict[int, np.ndarray] = {}
+
+    pinned_s_to_nid = {s: nid for s, nid in pinned_positions}
+
+    for s in target_s:
+        # Check if this is a pinned node
+        if s in pinned_s_to_nid:
+            nid = pinned_s_to_nid[s]
+            seeded_nids.append(nid)
+            new_positions[nid] = node_positions[nid].copy()
+            continue
+
+        # Check if this is an endpoint
+        if abs(s) < 1e-12:
+            seeded_nids.append(segment[0])
+            new_positions[segment[0]] = node_positions[segment[0]].copy()
+            continue
+        if abs(s - total_len) < 1e-12:
+            seeded_nids.append(segment[-1])
+            new_positions[segment[-1]] = node_positions[segment[-1]].copy()
+            continue
+
+        # Interpolate along polyline
+        for j in range(1, len(cum_len)):
+            if cum_len[j] >= s - 1e-12:
+                t = (s - cum_len[j - 1]) / (cum_len[j] - cum_len[j - 1]) \
+                    if cum_len[j] > cum_len[j - 1] else 0.0
+                t = max(0.0, min(1.0, t))
+                p = (1 - t) * node_positions[segment[j - 1]] + \
+                    t * node_positions[segment[j]]
+
+                # Check if close to an existing original node
+                close_nid = None
+                for orig_nid in [segment[j - 1], segment[j]]:
+                    if float(np.linalg.norm(p - node_positions[orig_nid])) < \
+                            target_length * 0.1:
+                        close_nid = orig_nid
+                        break
+
+                if close_nid and close_nid not in seeded_nids:
+                    seeded_nids.append(close_nid)
+                    new_positions[close_nid] = node_positions[close_nid].copy()
+                else:
+                    nid = next_nid_ref[0]
+                    next_nid_ref[0] += 1
+                    seeded_nids.append(nid)
+                    new_positions[nid] = p.copy()
+                break
+
+    return seeded_nids, new_positions
+
+
+def seed_all_edges(
+    patches: List[Set[int]],
+    elem_nodes_map: Dict[int, List[int]],
+    edge_elems: Dict[Edge, List[int]],
+    node_positions: Dict[int, np.ndarray],
+    pinned: Set[int],
+    global_boundary_nodes: Set[int],
+    target_length: float,
+    next_nid_ref: List[int],
+) -> Tuple[Dict[Edge, List[int]], Dict[int, np.ndarray]]:
+    """Seed all unique boundary segments across all patches.
+
+    Each segment between two corner nodes is seeded once.  The same
+    seeded node list is used by both patches sharing that edge, ensuring
+    a conformal mesh.
+
+    Returns:
+        segment_cache: {(corner_a, corner_b): [seeded_nids]}
+        all_seed_positions: {nid: xyz} for all new + preserved nodes
+    """
+    # Corner nodes: nodes where 3+ boundary edges meet, or pinned
+    bnd_degree: Dict[int, int] = defaultdict(int)
+    for eid, nodes in elem_nodes_map.items():
+        for i in range(len(nodes)):
+            e = _edge(nodes[i], nodes[(i + 1) % len(nodes)])
+            if e in edge_elems:
+                eids = edge_elems[e]
+                # It's a boundary edge if it's not purely interior
+                if len(eids) <= 1 or any(
+                    elem_nodes_map.get(eids[0], []) and
+                    elem_nodes_map.get(eids[-1], [])
+                    for _ in [0]
+                ):
+                    pass
+
+    # Simpler: corners = global_boundary_nodes that have != 2 patch-boundary neighbors
+    # Build adjacency among boundary nodes
+    bnd_adj: Dict[int, Set[int]] = defaultdict(set)
+    for patch_eids in patches:
+        pec: Dict[Edge, int] = defaultdict(int)
+        for eid in patch_eids:
+            nodes = elem_nodes_map.get(eid, [])
+            for i in range(len(nodes)):
+                e = _edge(nodes[i], nodes[(i + 1) % len(nodes)])
+                pec[e] += 1
+        for (n1, n2), cnt in pec.items():
+            if cnt == 1:  # patch boundary edge
+                if n1 in global_boundary_nodes and n2 in global_boundary_nodes:
+                    bnd_adj[n1].add(n2)
+                    bnd_adj[n2].add(n1)
+
+    corners: Set[int] = set()
+    for n, nbrs in bnd_adj.items():
+        if len(nbrs) != 2:
+            corners.add(n)
+    corners |= (pinned & global_boundary_nodes)
+
+    # Extract boundary loops per patch and split at corners
+    segment_cache: Dict[Tuple[int, int], List[int]] = {}
+    all_seed_positions: Dict[int, np.ndarray] = {}
+
+    for patch_eids in patches:
+        loops = extract_patch_boundary_loops(patch_eids, elem_nodes_map, edge_elems)
+        all_corners = corners | pinned
+        segmented = _order_boundary_segments(loops, all_corners)
+
+        for loop_segs in segmented:
+            for seg in loop_segs:
+                if len(seg) < 2:
+                    continue
+                key = (seg[0], seg[-1])
+                rev_key = (seg[-1], seg[0])
+                if key in segment_cache or rev_key in segment_cache:
+                    continue
+
+                seeded, positions = seed_segment(
+                    seg, node_positions, target_length, pinned, next_nid_ref)
+                segment_cache[key] = seeded
+                all_seed_positions.update(positions)
+
+    return segment_cache, all_seed_positions
+
+
 def remesh_patch(
     patch_eids: Set[int],
     elem_nodes_map: Dict[int, List[int]],
@@ -599,192 +797,179 @@ def remesh_patch(
     target_length: float,
     prefer_quads: bool = True,
     pid: int = 1,
+    segment_cache: Optional[Dict[Tuple[int, int], List[int]]] = None,
+    seed_positions: Optional[Dict[int, np.ndarray]] = None,
     global_boundary_nodes: Optional[Set[int]] = None,
 ) -> Tuple[Dict[int, np.ndarray], List[Tuple[str, int, List[int]]], int]:
-    """Remesh a single patch by decimating the existing mesh.
+    """Remesh a patch using Gmsh with pre-seeded boundary nodes.
 
-    Simple edge-collapse approach: iteratively collapse the shortest
-    interior edge until all edges are >= target_length.  Boundary nodes
-    and pinned nodes are never moved.  No external mesher needed.
+    The boundary is defined by the seeded nodes from seed_all_edges.
+    Gmsh fills the interior with quads/tris at the target size.
 
     Returns:
         new_nodes: {nid: xyz}
         new_elems: [(type, pid, [nids])]
         next_id: unused
     """
-    from scipy.spatial import KDTree
+    if gmsh is None:
+        raise ImportError("gmsh is required. pip install gmsh")
 
-    # Build local working copies
-    local_nodes: Dict[int, np.ndarray] = {}
-    for eid in patch_eids:
-        for n in elem_nodes_map.get(eid, []):
-            if n in node_positions:
-                local_nodes[n] = node_positions[n].copy()
-
-    local_elems: Dict[int, List[int]] = {}
-    for eid in patch_eids:
-        nodes = elem_nodes_map.get(eid, [])
-        if len(nodes) >= 3:
-            local_elems[eid] = list(nodes)
-
-    if len(local_nodes) < 3:
+    # Get boundary loops for this patch
+    loops = extract_patch_boundary_loops(patch_eids, elem_nodes_map, edge_elems)
+    if not loops:
         return {}, [], 0
 
-    # Identify boundary nodes of this patch (edges used by only 1 element)
-    patch_edge_count: Dict[Edge, int] = defaultdict(int)
-    for eid, nodes in local_elems.items():
-        for i in range(len(nodes)):
-            e = _edge(nodes[i], nodes[(i + 1) % len(nodes)])
-            patch_edge_count[e] += 1
+    corners = (pinned | set()) & (global_boundary_nodes or set())
+    segmented = _order_boundary_segments(loops, corners | pinned)
 
-    boundary_nids: Set[int] = set()
-    for (n1, n2), cnt in patch_edge_count.items():
-        if cnt == 1:
-            boundary_nids.add(n1)
-            boundary_nids.add(n2)
-
-    # Also include global boundary nodes (feature edges, PID boundaries, free edges)
-    if global_boundary_nodes:
-        boundary_nids |= (global_boundary_nodes & set(local_nodes.keys()))
-
-    # Nodes that cannot be removed: boundary + pinned
-    locked = boundary_nids | (pinned & set(local_nodes.keys()))
-
-    # Build node-to-elements map
-    n2e: Dict[int, Set[int]] = defaultdict(set)
-    for eid, nodes in local_elems.items():
-        for n in nodes:
-            n2e[n].add(eid)
-
-    removed_nodes: Set[int] = set()
-    removed_elems: Set[int] = set()
-
-    # Build a min-heap of (length, n1, n2) for edges shorter than target
-    import heapq
-    heap: List[Tuple[float, int, int]] = []
-    seen_edges: Set[Edge] = set()
-    for eid, nodes in local_elems.items():
-        for i in range(len(nodes)):
-            e = _edge(nodes[i], nodes[(i + 1) % len(nodes)])
-            if e in seen_edges:
+    # Build the seeded boundary loop by looking up each segment in the cache
+    seeded_loops: List[List[int]] = []
+    for loop_segs in segmented:
+        seeded_loop: List[int] = []
+        for seg in loop_segs:
+            if len(seg) < 2:
+                if seg and seg[0] not in seeded_loop:
+                    seeded_loop.append(seg[0])
                 continue
-            seen_edges.add(e)
-            n1, n2 = e
-            if n1 in locked and n2 in locked:
-                continue
-            if n1 in local_nodes and n2 in local_nodes:
-                d = float(np.linalg.norm(local_nodes[n2] - local_nodes[n1]))
-                if d < target_length:
-                    heapq.heappush(heap, (d, n1, n2))
-
-    while heap:
-        best_len, n1, n2 = heapq.heappop(heap)
-
-        if n1 in removed_nodes or n2 in removed_nodes:
-            continue
-        if n1 not in local_nodes or n2 not in local_nodes:
-            continue
-
-        # Recheck length (may have changed)
-        d = float(np.linalg.norm(local_nodes[n2] - local_nodes[n1]))
-        if d >= target_length:
-            continue
-        if n1 in locked and n2 in locked:
-            continue
-        # Decide which to keep
-        if n1 in locked:
-            n_keep, n_remove = n1, n2
-        elif n2 in locked:
-            n_keep, n_remove = n2, n1
-        else:
-            # Keep the one with more connections
-            if len(n2e.get(n1, set()) - removed_elems) >= len(n2e.get(n2, set()) - removed_elems):
-                n_keep, n_remove = n1, n2
+            key = (seg[0], seg[-1])
+            rev_key = (seg[-1], seg[0])
+            if segment_cache and key in segment_cache:
+                nids = segment_cache[key]
+            elif segment_cache and rev_key in segment_cache:
+                nids = list(reversed(segment_cache[rev_key]))
             else:
-                n_keep, n_remove = n2, n1
+                # Fallback: keep original segment endpoints
+                nids = [seg[0], seg[-1]]
 
-        # Check: would this collapse remove any element that touches a
-        # boundary node?  If so, skip — it could erode the patch outline.
-        would_harm_boundary = False
-        affected = list(n2e.get(n_remove, set()))
-        for eid in affected:
-            if eid in removed_elems or eid not in local_elems:
-                continue
-            nodes = local_elems[eid]
-            new_nodes_list = [n_keep if n == n_remove else n for n in nodes]
-            unique = []
-            for n in new_nodes_list:
-                if n not in unique:
-                    unique.append(n)
-            if len(unique) < 3:
-                # Element would be removed — reject if ANY of its nodes
-                # are boundary nodes (preserves the full boundary ring)
-                if any(n in boundary_nids for n in nodes):
-                    would_harm_boundary = True
-                    break
+            # Append without duplicating the junction node
+            for nid in nids:
+                if not seeded_loop or seeded_loop[-1] != nid:
+                    seeded_loop.append(nid)
 
-        if would_harm_boundary:
-            continue
+        # Close the loop (remove duplicate of first node at end)
+        if seeded_loop and seeded_loop[-1] == seeded_loop[0]:
+            seeded_loop.pop()
 
-        # Update elements: replace n_remove with n_keep
-        for eid in affected:
-            if eid in removed_elems or eid not in local_elems:
-                continue
-            nodes = local_elems[eid]
-            new_nodes_list = [n_keep if n == n_remove else n for n in nodes]
+        if len(seeded_loop) >= 3:
+            seeded_loops.append(seeded_loop)
 
-            # Check for degenerate
-            unique = []
-            for n in new_nodes_list:
-                if n not in unique:
-                    unique.append(n)
+    if not seeded_loops:
+        return {}, [], 0
 
-            if len(unique) < 3:
-                removed_elems.add(eid)
-                continue
+    # Collect all positions needed
+    all_pos = dict(seed_positions) if seed_positions else {}
+    for loop in seeded_loops:
+        for nid in loop:
+            if nid not in all_pos and nid in node_positions:
+                all_pos[nid] = node_positions[nid].copy()
 
-            local_elems[eid] = unique if len(nodes) == 4 and len(unique) == 3 else new_nodes_list
-            n2e[n_keep].add(eid)
+    # Build Gmsh geometry from seeded boundary
+    gmsh.initialize()
+    gmsh.option.setNumber("General.Verbosity", 0)
+    gmsh.model.add("patch")
 
-        removed_nodes.add(n_remove)
-        if n_remove in n2e:
-            del n2e[n_remove]
+    point_tags: Dict[int, int] = {}
+    gtag = 1
+    for loop in seeded_loops:
+        for nid in loop:
+            if nid not in point_tags and nid in all_pos:
+                pos = all_pos[nid]
+                gmsh.model.geo.addPoint(
+                    pos[0], pos[1], pos[2], target_length, gtag)
+                point_tags[nid] = gtag
+                gtag += 1
 
-        # Add new edges from n_keep to the heap
-        for eid in n2e.get(n_keep, set()):
-            if eid in removed_elems or eid not in local_elems:
-                continue
-            nodes = local_elems[eid]
-            for i in range(len(nodes)):
-                en1, en2 = nodes[i], nodes[(i + 1) % len(nodes)]
-                if en1 in removed_nodes or en2 in removed_nodes:
-                    continue
-                if en1 in locked and en2 in locked:
-                    continue
-                if en1 in local_nodes and en2 in local_nodes:
-                    ed = float(np.linalg.norm(
-                        local_nodes[en2] - local_nodes[en1]))
-                    if ed < target_length:
-                        heapq.heappush(heap, (ed, min(en1, en2),
-                                              max(en1, en2)))
+    line_tag = 1
+    curve_loop_tags = []
+    cl_tag = 1
+    for loop in seeded_loops:
+        loop_lines = []
+        for i in range(len(loop)):
+            n1 = loop[i]
+            n2 = loop[(i + 1) % len(loop)]
+            if n1 in point_tags and n2 in point_tags:
+                gmsh.model.geo.addLine(point_tags[n1], point_tags[n2], line_tag)
+                loop_lines.append(line_tag)
+                line_tag += 1
+        if loop_lines:
+            gmsh.model.geo.addCurveLoop(loop_lines, cl_tag)
+            curve_loop_tags.append(cl_tag)
+            cl_tag += 1
 
-    # Build output
+    if not curve_loop_tags:
+        gmsh.finalize()
+        return {}, [], 0
+
+    surf_tag = 1
+    try:
+        gmsh.model.geo.addPlaneSurface(curve_loop_tags, surf_tag)
+    except Exception:
+        try:
+            gmsh.model.geo.addSurfaceFilling([curve_loop_tags[0]], surf_tag)
+        except Exception as e:
+            logger.debug(f"    Surface creation failed: {e}")
+            gmsh.finalize()
+            return {}, [], 0
+
+    gmsh.model.geo.synchronize()
+
+    if prefer_quads:
+        gmsh.option.setNumber("Mesh.Algorithm", 8)
+        gmsh.option.setNumber("Mesh.RecombineAll", 1)
+    else:
+        gmsh.option.setNumber("Mesh.Algorithm", 6)
+
+    try:
+        gmsh.model.mesh.generate(2)
+    except Exception as e:
+        logger.debug(f"    Gmsh meshing failed: {e}")
+        gmsh.finalize()
+        return {}, [], 0
+
+    # Extract result
+    node_tags_out, coords_out, _ = gmsh.model.mesh.getNodes()
+    if len(coords_out) == 0:
+        gmsh.finalize()
+        return {}, [], 0
+    coords_out = coords_out.reshape(-1, 3)
+
     new_nodes: Dict[int, np.ndarray] = {}
-    for nid, pos in local_nodes.items():
-        if nid not in removed_nodes:
-            new_nodes[nid] = pos
+    gmsh_to_nid: Dict[int, int] = {}
+
+    # Map boundary Gmsh points back to original/seeded NIDs
+    for nid, pt in point_tags.items():
+        gmsh_to_nid[pt] = nid
+        new_nodes[nid] = all_pos[nid].copy()
+
+    # Interior nodes get new IDs
+    temp_id = max(node_positions.keys()) + 200000
+    for i, gt in enumerate(node_tags_out):
+        gt = int(gt)
+        if gt in gmsh_to_nid:
+            continue
+        temp_id += 1
+        gmsh_to_nid[gt] = temp_id
+        new_nodes[temp_id] = coords_out[i].copy()
 
     new_elems: List[Tuple[str, int, List[int]]] = []
-    for eid, nodes in local_elems.items():
-        if eid in removed_elems:
+    elem_types_out, elem_tags_out, elem_node_tags_out = gmsh.model.mesh.getElements(2)
+    for etype, etags, entags in zip(elem_types_out, elem_tags_out, elem_node_tags_out):
+        if etype == 2:
+            nodes_per = 3
+        elif etype == 3:
+            nodes_per = 4
+        else:
             continue
-        # Filter removed nodes from element
-        live = [n for n in nodes if n not in removed_nodes]
-        if len(live) == 3:
-            new_elems.append(("CTRIA3", pid, live))
-        elif len(live) == 4:
-            new_elems.append(("CQUAD4", pid, live))
+        entags_list = entags.tolist()
+        for j in range(len(etags)):
+            enodes = [gmsh_to_nid.get(int(entags_list[j * nodes_per + k]))
+                      for k in range(nodes_per)]
+            if any(n is None for n in enodes):
+                continue
+            etype_name = "CTRIA3" if nodes_per == 3 else "CQUAD4"
+            new_elems.append((etype_name, pid, enodes))
 
+    gmsh.finalize()
     return new_nodes, new_elems, 0
 
 
@@ -1136,14 +1321,23 @@ def remesh_surfaces(
         logger.error("--target is required for remeshing")
         return {}
 
-    # ── Step 5: remesh ──
-    logger.info(f"\nRemeshing {len(patches)} patches (target={target_length})...")
+    # ── Step 5a: seed boundary edges ──
+    logger.info(f"\nSeeding boundary edges (target={target_length})...")
+    next_nid_ref = [max(node_positions.keys()) + 1]
+    segment_cache, seed_positions = seed_all_edges(
+        patches, elem_nodes_map, edge_elems, node_positions,
+        pinned, global_boundary_nodes, target_length, next_nid_ref,
+    )
+    logger.info(f"  Segments seeded: {len(segment_cache)}")
+    logger.info(f"  Seed nodes: {len(seed_positions)}")
 
-    all_new_nodes: Dict[int, np.ndarray] = {}
+    # ── Step 5b: remesh each patch ──
+    logger.info(f"Remeshing {len(patches)} patches...")
+
+    all_new_nodes: Dict[int, np.ndarray] = dict(seed_positions)
     all_new_elems: List[Tuple[str, int, List[int]]] = []
     node_id_map: Dict[int, int] = {}
-    next_nid = max(node_positions.keys()) + 1
-    next_eid = max(model.elements.keys()) + 1
+    next_nid = next_nid_ref[0]
 
     pid_filter = set(pids) if pids else None
     patches_remeshed = 0
@@ -1151,13 +1345,11 @@ def remesh_surfaces(
 
     for pidx, (patch, patch_pid) in enumerate(zip(patches, patch_pids)):
         if pid_filter and patch_pid not in pid_filter:
-            # Keep original elements
             for eid in patch:
                 nodes = elem_nodes_map.get(eid, [])
                 for n in nodes:
                     if n not in all_new_nodes and n in node_positions:
                         all_new_nodes[n] = node_positions[n].copy()
-                elem = model.elements[eid]
                 etype = "CTRIA3" if len(nodes) == 3 else "CQUAD4"
                 all_new_elems.append((etype, patch_pid, nodes))
             patches_kept += 1
@@ -1167,6 +1359,8 @@ def remesh_surfaces(
         new_nodes, new_elems, _ = remesh_patch(
             patch, elem_nodes_map, node_positions, edge_elems,
             pinned, target_length, prefer_quads, patch_pid,
+            segment_cache=segment_cache,
+            seed_positions=seed_positions,
             global_boundary_nodes=global_boundary_nodes,
         )
 
@@ -1184,8 +1378,7 @@ def remesh_surfaces(
 
         # Remap temp node IDs to sequential IDs
         for temp_nid, pos in new_nodes.items():
-            if temp_nid in node_positions:
-                # Original boundary node - keep original ID
+            if temp_nid in node_positions or temp_nid in seed_positions:
                 all_new_nodes[temp_nid] = pos
                 node_id_map[temp_nid] = temp_nid
             else:
@@ -1199,7 +1392,7 @@ def remesh_surfaces(
 
         patches_remeshed += 1
 
-    # Ensure ALL global boundary nodes are in the output — they define the geometry
+    # Ensure ALL global boundary nodes are in the output
     for nid in global_boundary_nodes:
         if nid not in all_new_nodes and nid in node_positions:
             all_new_nodes[nid] = node_positions[nid].copy()
